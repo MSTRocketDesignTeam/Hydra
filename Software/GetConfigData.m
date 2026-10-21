@@ -11,19 +11,17 @@ function data = GetConfigData(args)
 %       string or char
 % -------------------------------------------------------------------------
 % Dependencies
-%   #) <Dependency Filepath>
+%   #) <Dependency>
 % -------------------------------------------------------------------------
 % Assumptions
 %   #) <Assumption>
 % -------------------------------------------------------------------------
-% Sources
-%   #) <Source>
-% -------------------------------------------------------------------------
-% Document Version 2.0, former versions:
+% Document Version 2.1, former versions:
+%   - 2.0
 %   - 1.0
 % -------------------------------------------------------------------------
-% MATLAB Version R2024b, also compatible with:
-%   - R2025b
+% MATLAB Version R2025a, also compatible with:
+%   - R2024b
 % -------------------------------------------------------------------------
 % Developed by Alex Vance (AlexVance00 on Github)
 % -------------------------------------------------------------------------
@@ -135,9 +133,23 @@ function data = GetConfigData(args)
                 % know the difference), remove them
                 fileSearchMatches = fileSearchMatches(~[fileSearchMatches.isdir]);
                 if ~isempty(fileSearchMatches)
-                    % If the string was a filename, read in its contents
-                    cellData = readcell(fullfile(fileSearchMatches(1).folder, fileSearchMatches(1).name));
+                    % If the string was a filename and a .xlsx file, read
+                    % it in. Otherwise just set the variable value to the
+                    % name of the file
+                    dataFilename = fullfile(fileSearchMatches(1).folder, fileSearchMatches(1).name);
+                    if ~contains(dataFilename, ".xlsx")
+                        data(i).(varName) = lastValue;
+                        continue;
+                    end
+                    cellData = readcell(dataFilename);
                     structFieldnames = cellData(1, :);
+                    % Log what file was used
+                    % But first check if file is a field already used
+                    % in the tabulated values file
+                    if ismember("file", structFieldnames)
+                        error("Field ""file"" cannot be used in tabulated values at: %s\n", dataFilename);
+                    end
+                    data(i).(varName).file = fileSearchMatches(1).name;
                     % Check if any elements in first row are empty- this
                     % sometimes happens when excel stores empty characters
                     % in cells that used to have values but don't anymore
@@ -147,6 +159,28 @@ function data = GetConfigData(args)
                     % structFieldnames, and assign the values under it in that
                     % column in cellData to that field
                     for k = 1:numColumns
+                        % Check if value is char
+                        if ischar(cellData{2, k})
+                            % If so, data won't compile into correct size
+                            % column of string types, it will split
+                            % everything up into individual characters,
+                            % with each character in its own row,
+                            % regardless of how many elements are in the
+                            % other columns. So make them string types.
+                            % Will need to iterate thru rows
+                            numRows = size(cellData, 1) - 1;
+                            array = strings(numRows, 1);
+                            for m = 1:numRows
+                                array(m) = string(cellData(m + 1, k));
+                            end
+                           
+                            % Now assign that array to the appropriate
+                            % range in data
+                            data(i).(varName).(structFieldnames{k}) = array;                            
+
+                            % Skip to next column
+                            continue;                            
+                        end
                         data(i).(varName).(structFieldnames{k}) = [cellData{2:end, k}]';
                     end
     
