@@ -2,19 +2,10 @@ autoTradePriorities.mat
 regenEngineTradesData.mat
 regenEngineTradesCalculator.asv
 SCRIPTVERSIONregenEngineTradesViewer.asv
-Chamber01.STEP
-Chamber01MMGS.STEP
-Chamber01MKS.STEP
-CAD/~$Chamber01.SLDPRT
 CAD/Chamber01.x_t
 CAD/Chamber01_Sliced_MKS.x_t
-CAD/\[HCH-1\] Combustion Chamber.STEP
-CAD/~$\[HCH-1\] Combustion Chamber.SLDPRT
-CAD/\[HCH-1\] Combustion Chamber MMGS.STEP
-CAD/\[HCH-1\] Combustion Chamber Vertical Cross Section MKS.STEP
 Software/GetRadiusOfCurvature.asv
 Software/GetBartzh_g.asv
-CAD/STEP Files/\[HCH-1\] Combustion Chamber - MKS.STEP
 Software/randomDataDump.xlsx
 Software/~$randomDataDump.xlsx
 Software/injectorMountHoleStress.asv
