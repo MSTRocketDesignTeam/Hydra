@@ -9,24 +9,25 @@ BEGIN INSTRUCTIONS
 	E:		elastic modulus, 			Pa
 	CTE:		coefficient of thermal expansion, 	K^-1
 	epsilon:	surface roughness, 			m
-	k:		thermal conductivity, 			W/(m-K)
+	k:		thermal conductivity vs. temperature,	W/(m-K) vs. K
+	sigma_y:	yield stress vs. temperature,		Pa vs. K
 
-2) To add a new config., copy the format below. If the variable value isn't a constant, set the value
-	to "<filename>" or "correlation". If they are tabulated values dependent on some other independent
-	variable, choose "<filename>" except replace <filename> with the filename of a .xlsx file that
-	stores those tabulated values. Go to tabulatedValuesTemplate.xlsx to see an example format of
-	how to set one of those up. If the values are more complicated than that and are dependent on a
-	correlation, perhaps from some research paper, choose "correlation", and that will indicate the
-	correlation is stored in that specific configs. subclass in MATLAB.
+2) To add a new config., copy the format below. Temperature-dependent
+	properties are evaluated using linear interpolation with coefficients
+	in a matrix with rows of the form [T, value] (No spaces inside the
+	brackets- the config reader splits lines on spaces). Reading for a
+	value for a temperature outside the table's T range results in an
+	error.
 
 \EXAMPLE\
-type = <value>
-cost = <value>
-mlr_wgt = <value>
-rho = "correlation"
-cp = "exampleFilename.xlsx"
-k = "correlation"
-mu = "correlation"
+rho = <value>
+cp = <value>
+T_melt = <value>
+E = <value>
+CTE = <value>
+epsilon = <value>
+k = [<T1>,<value1>;<T2>,<value2>]
+sigma_y = [<T1>,<value1>;<T2>,<value2>]
 \END\
 
 3) Separate configs. as shown below
@@ -42,11 +43,12 @@ mu = "correlation"
 END INSTRUCTIONS
 %
 \AlSi10Mg\
-rho = 0.002665
+rho = 2665
 cp = 1100
 T_melt = 843.15
 E = 68000000000
 CTE = 0.000027
 epsilon = 0.000012
-k = 112.4
+k = [273.15,118.5;298.15,118.5;473.15,127;673.15,164]
+sigma_y = [273.15,280E6;423.15,280E6;523.15,210E6;623.15,135E6;723.15,65E6;10273.15,65E6]
 \END\

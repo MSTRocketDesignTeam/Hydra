@@ -4,31 +4,59 @@ Propellant Data Configs.
 BEGIN INSTRUCTIONS
 1) Read the variable descriptions below:
 	name:		propellant name,			~
+	phase:		<"LIQUID", "GAS">,			~
 	type:		<"OXIDIZER", "FUEL">,			~
 	cost:		cost per unit mass,			USD/kg
 	mlr_wgt:	molar weight,				kg/mol
+	T_crit:		critical temperature,			K
+	P_crit:		critical pressure,			Pa
+	rho_crit:	critical density,			kg/m^3
 	rho: 		density, 				kg/m^3
 	cp: 		specific heat at constant pressure, 	J/(kg-K)
 	k:		thermal conductivity, 			W/(m-K)
 	mu:		dynamic viscosity,			Pa-s
+	p_vap:		vapor pressure,				Pa
 
-2) To add a new config., copy the format below. If the variable value isn't a constant, set the value
-	to "<filename>" or "correlation". If they are tabulated values dependent on some other independent
-	variable, choose "<filename>" except replace <filename> with the filename of a .xlsx file that
-	stores those tabulated values. Go to tabulatedValuesTemplate.xlsx to see an example format of
-	how to set one of those up. If the values are more complicated than that and are dependent on a
-	correlation, perhaps from some research paper, choose "correlation", and that will indicate the
-	correlation is stored in that specific configs. subclass in MATLAB.
+2) To add a new config., copy the format below. A property (rho, cp, k, mu, p_vap) is
+	either a constant number, or a correlation. For a correlation, set the property to
+	"correlation" and add two more lines, <property>_model and <property>_coeffs. The model
+	is the name of one of the correlation models implemented in Propellant.m, and the coeffs
+	are that model's coefficients as a row vector or matrix. NO SPACES inside the brackets
+	(the config reader splits lines on spaces). Every model's coefficient layout is
+	documented in the header of its method in Propellant.m and summarized here:
+
+	"rackett"		rho(T), Rackett equation
+				[Zc]
+	"assael_ethanol"	k(T, rho), Assael et al. 2010 (J. Phys. Chem. Ref. Data)
+				[lambda0 numerator, 6 coeffs, Tr^0..Tr^5,
+				 lambda0 denominator, 3 coeffs, Tr^0..Tr^2,
+				 B1, 5 coeffs, B2, 5 coeffs,
+				 critical enhancement: amplitude, offset, exponent coeff]
+	"sotiriadou_ethanol"	mu(T, rho), Sotiriadou et al. 2023
+				[b0..b5, c0, c1, epsilon/k_B, sigma, d0..d6, d7, d8, e1, e2]
+	"antoine"		p_vap(T), piecewise Antoine equation (T in K, bar -> Pa)
+				one row per valid temperature range: [T_low, T_high, A, B, C]
+	"table"			any property, linear interpolation, one row per point: [T, value]
+
+	If a property depends on tabulated values stored in an .xlsx file instead, set it to
+	"<filename>" as before (see GetConfigData.m).
 
 \EXAMPLE\
 name = <value>
+phase = <value>
 type = <value>
 cost = <value>
 mlr_wgt = <value>
+T_crit = <value>
+P_crit = <value>
+rho_crit = <value>
 rho = "correlation"
-cp = "exampleFilename.xlsx"
-k = "correlation"
-mu = "correlation"
+rho_model = "<model name>"
+rho_coeffs = [<values>]
+cp = <value>
+k = <value>
+mu = <value>
+p_vap = <value>
 \END\
 
 3) Separate configs. as shown below
@@ -43,24 +71,35 @@ mu = "correlation"
 
 END INSTRUCTIONS
 %
-\ETHANOL\
+\ETHANOL_L\
 name = "ETHANOL"
+phase = "LIQUID"
 type = "FUEL"
 cost = 1.0141
 mlr_wgt = 0.0460684
+T_crit = 514
+P_crit = 6.14E6
+rho_crit = 276
 rho = "correlation"
+rho_model = "rackett"
+rho_coeffs = 0.241
 cp = 2430
 k = "correlation"
+k_model = "assael_ethanol"
+k_coeffs = [-2.09575,19.9045,-53.964,82.1223,-1.98864,-0.495513,0.17223,-0.078273,1,2.67222E-2,1.48279E-1,-1.30429E-1,3.46232E-2,-2.44293E-3,1.77166E-2,-8.93088E-2,6.84664E-2,-1.45702E-2,8.09189E-4,1.7E-3,7E-2,1.7]
 mu = "correlation"
+mu_model = "sotiriadou_ethanol"
+mu_coeffs = [0.422373,-3.78868,23.8708,-7.89204,2.09783,-0.247702,-0.0281703,1,265,0.479E-9,-1.9572881E1,2.1973999E2,-1.0153226E3,2.4710125E3,-3.3751717E3,2.4916597E3,-7.8726086E2,1.4085455E1,-3.4664158E-1,8.32575272,9.66535242E-2]
+p_vap = "correlation"
+p_vap_model = "antoine"
+p_vap_coeffs = [273.15,292.77,5.37229,1670.409,-40.191;292.77,364.8,5.24677,1598.673,-46.424;364.8,513.91,4.92531,1432.526,-61.819]
 \END\
 
-\N2O\
+\N2O_L\
 name = "N2O"
+phase = "LIQUID"
 type = "OXIDIZER"
 cost = 13.2277
 mlr_wgt = 0.04401
-rho = "correlation"
 cp = 880
-k = "correlation"
-mu = "correlation"
 \END\

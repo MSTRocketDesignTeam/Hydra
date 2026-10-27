@@ -1,0 +1,72 @@
+properties (Constant, Hidden)
+        % Physical constants
+        g0 = 9.81; % Gravitational acceleration on Earth at sea level
+        R_universal = 8.314; % Universal gas constant
+        p_SL = 101325; % Total air pressure of still air at sea level, Pa
+        T_SL = 288.15; % Total temperature of still air at sea level
+        mlr_wgt_air = .02896968; % Molar weight of air
+        lapse_rate = .00976; % Temperature lapse rate used for ambient pressure (K/m)
+
+        % Number of axial stations in each section of the contour. These set
+        % the size of every station array, so they're shared by all engines
+        nStations = struct("nozzleParabolic", 100, ...
+            "nozzleCircular", 100, "chamberCircular", 100, ...
+            "chamberParabolic", 100, "chamberLinear", 2);
+
+        % Reynolds number at which pipe flow is taken to go from laminar to turbulent
+        Re_D_transition = 2300;
+        % Stations whose wall slope |dr/dz| is below this are treated as
+        % straight, so the radius of curvature term in Bartz drops out
+        tol_R_curv = .05;
+        % Stations whose area ratio is within this of 1 are at the throat
+        tol_throat = .0001;
+        % Wall temperature convergence tolerance (K) and max iterations
+        tol_T_wg = 5;
+        maxIter_T_wg = 20;
+
+        % Names of the inputs that can be swept, in the order of the dimensions
+        % of the engine array
+        sweepNames = ["pc", "OF", "expansion_ratio", "mdot", "d_channel", ...
+            "num_channels", "T_coolant_i", "wall_t", "k_wall", "CR", "Lstar"];
+    end
+
+    properties (SetAccess = private)
+        % Environment
+        alt = 342; % Altitude above sea level
+        T_amb = 273.15 + 20; % Static ambient temperature
+        p_amb = 101325; % Static ambient pressure
+
+        % Information about the material the engine is made of
+        material Material % Material class object
+
+        % Information about the engine propellants
+        fuel Propellant % Engine fuel propellant, Propellant class object
+        oxidizer Propellant % Engine oxidizer propellant, Propellant class object
+
+        % Design inputs
+        pc = 128 * 6894.76; % Chamber pressure (Pa)
+        OF = 1.6; % Oxidizer to fuel mass ratio
+        expansion_ratio = 1.8; % Nozzle exit area to throat area
+        mdot = 1.2 * .45359237; % Total propellant mass flow rate (kg/s)
+        d_channel = 1.2E-3; % Square coolant channel side (m)
+        num_channels = 48; % Number of coolant channels
+        T_coolant_i = 273.15 + 20; % Coolant temperature at channel inlet (K)
+        wall_t = .8E-3; % Hot wall thickness (m)
+        k_wall = 112.4; % Hot wall thermal conductivity for the throat estimate (W/m-K)
+        CR = 6; % Contraction ratio, chamber area to throat area
+        Lstar = .6; % Characteristic chamber length, chamber volume / throat area (m)
+        thetaN_deg = 20; % Nozzle parabola initial angle (deg)
+        fpct = 1; % Nozzle length as fraction of a 15 deg half-angle conical nozzle
+        etaRc = .2; % How far (fraction) between throat and chamber radius the converging arc ends
+        DF_stress = 2; % Design factor for total mechanical stress
+        DF_temp = 1.5; % Design factor for gas-side hot wall temperature
+        DF_p_coolant = 1.2; % Design factor for minimum coolant pressure to prevent boiling
+
+        % Results, see Comments in the class header
+        gas struct % Combustion gas state from CEA
+        perf struct % Performance
+        geom struct % Geometry and contour
+        coolant struct % Coolant state at the channel inlet
+        wall struct % Wall temperatures, heat flux and stresses
+        solved logical = false; % Whether solve() has run for this engine
+    end
