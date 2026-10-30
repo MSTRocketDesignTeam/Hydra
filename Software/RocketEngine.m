@@ -45,8 +45,17 @@
 %   8) Hoop stress estimates use a thin wall assumption
 %   9) Vectorization: all engines in an array are solved at the same time
 %       and must share fuel, oxidizer and material. CEA is not
-%       vectorizable,
-%       so it is called once for each unique (pc, MR, expansion_ratio, CR).
+%       vectorizable, so it is called only for each unique (pc, MR, CR,
+%       p_amb, thetaN, fpct, etaRc), in a few small calls each (see
+%       runCEA).
+%   10) The nozzle is ideally expanded at the design altitude: the exit
+%       pressure equals the ambient pressure p_amb. CEA is given the
+%       pressure ratio pc / p_amb and returns the expansion ratio, so
+%       expansion_ratio is an output, not an input. pc is the injector face
+%       pressure (CEA's Pinj), the small pressure drop to the end of the
+%       chamber is kept.
+%   11) The exhaust is frozen from the throat on (CEA frozen = 1 and
+%       frozenAtThroat = 1). Chamber and throat state is equilibrium.
 % -------------------------------------------------------------------------
 % Comments
 %   1) All units are in SI, inputs and outputs
@@ -129,6 +138,21 @@ classdef RocketEngine
 
         % Number of axial stations in each section of the contour. These set
         % the size of every station array, so they're shared by all engines
+        %
+        % CEA is asked for the gas state at the area ratio of every station.
+        % The distinct area ratios it must report are
+        %   supersonic: nozzleParabolic + nozzleCircular - 2 (the throat and
+        %       the duplicate station where the two sections meet; the exit
+        %       is one of them)
+        %   subsonic: chamberCircular + chamberParabolic - 3 (the throat,
+        %       the duplicate where the sections meet, and the chamber end)
+        % Limits that matter (read from RocketCEA's Fortran): a CEA call
+        % takes at most 8 supar and, with a finite area combustor, 12 subar,
+        % and a frozen-at-throat call silently drops its frozen results if it
+        % has more than 3 extra points. runCEA splits the lists across
+        % calls (maxSuparPerCall, maxSubarPerCall), so there is no hard cap
+        % on these numbers. Every 3 more supersonic or 4 more subsonic
+        % stations is one more CEA call per (pc, MR) case.
         numStations = struct("nozzleParabolic", 5, ...
             "nozzleCircular", 5, "chamberCircular", 5, ...
             "chamberParabolic", 5, "chamberLinear", 5);
@@ -146,9 +170,22 @@ classdef RocketEngine
         tol_T_wg = 5;
         maxIter_T_wg = 20;
 
+        % CEA call splitting, see numStations
+        maxSuparPerCall = 3;
+        maxSubarPerCall = 4;
+        % Station area ratios closer than this (relative) are one CEA point.
+        % Half of it is also how closely CEA's printed area ratios must match
+        % the requested ones
+        tol_arSchedule = 1E-3;
+        % Transport properties (cp, k, Pr) at the chamber, throat and
+        % subsonic stations: false = equilibrium reactions (what the earlier
+        % calculator used), true = frozen reactions. Supersonic stations
+        % are always frozen, the exhaust is frozen from the throat on.
+        useFrozenTransport = false;
+
         % Names of the inputs that can be swept, in the order of the dimensions
         % of the engine array
-        sweepNames = ["pc", "MR", "expansion_ratio", "mdot", "d_channel", ...
+        sweepNames = ["pc", "MR", "mdot", "d_channel", ...
             "num_channels", "T_coolant_i", "t_wall", "CR"];
     end
 
@@ -171,7 +208,7 @@ classdef RocketEngine
         % Design inputs
         pc = []; % Chamber pressure, Pa
         MR = []; % Oxidizer to fuel mass ratio
-        expansion_ratio = []; % Nozzle exit area to throat area
+        expansion_ratio = []; % Nozzle exit area to throat area, computed by solve for exit pressure = ambient pressure
         mdot = []; % Total propellant mass flow rate, kg/s
         d_channel = []; % side length of coolant channel square profile, m
         num_channels = []; % Number of coolant channels
@@ -218,8 +255,9 @@ classdef RocketEngine
         %   material = Material config name (string) or Material object
         %   alt = altitude (m), T_amb = ambient temperature (K),
         %   p_amb = ambient pressure (Pa), empty to compute from alt
-        %   pc, MR, expansion_ratio, mdot, d_channel, num_channels,
+        %   pc, MR, mdot, d_channel, num_channels,
         %   T_coolant_i, t_wall, CR, Lstar = see properties.
+        %       (expansion_ratio is not an input, solve computes it)
         %       T_coolant_i empty -> T_amb.
         %       Any of these may be an array to make an array of engines.
         %   thetaN, fpct, etaRc, DF_stress, DF_temp, DF_p_coolant = see
@@ -328,7 +366,9 @@ classdef RocketEngine
             numEngines = numel(objs);
 
             %% Combustion gas
-            gasProps = RocketEngine.runCEA(inputs, fuel, oxidizer);
+            % Also finds the expansion ratio (added to inputs) and the gas
+            % state at every contour station
+            [gasProps, gasLine, inputs] = RocketEngine.runCEA(inputs, fuel, oxidizer);
 
             %% Performance and sizing
             ge = gasProps.gamma_e;
@@ -350,9 +390,6 @@ classdef RocketEngine
             geom = RocketEngine.buildContour(inputs, perf.dt, perf.Vc);
             geom.vol_engine = RocketEngine.getShellVolume(geom, inputs);
             perf.TWR = perf.thrust ./ (RocketEngine.g0 .* material.rho .* geom.vol_engine);
-
-            %% Combustion gas state along the contour
-            gasLine = RocketEngine.getGasAlongContour(geom, gasProps);
 
             %% Coolant at the channel inlet
             coolant = RocketEngine.getCoolantInlet(inputs, fuel);
@@ -388,6 +425,7 @@ classdef RocketEngine
             gasLineFields = struct("M", gasLine.M, "T_gas", gasLine.T);
             geom = RocketEngine.mergeStructs(geom, gasLineFields);
             for i = 1:numEngines
+                objs(i).expansion_ratio = inputs.expansion_ratio(i);
                 objs(i).gasProps = RocketEngine.getRow(gasProps, i);
                 objs(i).perf = RocketEngine.getRow(perf, i);
                 objs(i).geom = RocketEngine.getRow(geom, i);
@@ -883,6 +921,47 @@ classdef RocketEngine
             M(free) = Mv;
         end
 
+        function cases = parseCEAOutput(outputText)
+        % Reads the text from RocketCEA's get_full_cea_output (short output)
+        % into a struct array, one element per case (a pc, O/F pair)
+        %                                  cases(i).eq, equilibrium page
+        %                                  cases(i).fr, frozen page (empty if
+        %                                  the call wasn't frozen)
+        % -----------------------------------------------------------------
+        % Each page is a struct of row vectors with one value per column of
+        % the page (injector, chamber end, throat, then the other points, in
+        % CEA's units): PinjOvP, P, T, rho, MW, gamma, mach, mu, cpThermo,
+        % cpEq, kEq, PrEq, cpFr, kFr, PrFr, and AeAt, cstar, CF, Ivac, Isp
+        % (CEA doesn't print these for the injector, so their first value is
+        % NaN), and OF, Pinj. Rows a page doesn't have are left out.
+        % -----------------------------------------------------------------
+        % Assumptions
+        %   1) Every page fits in one block of columns (CEA breaks wider
+        %       output into several blocks). The calls from runCEA are
+        %       kept narrow enough, and this errors if a row's length
+        %       isn't the page's number of columns
+        % -----------------------------------------------------------------
+            lines = regexp(char(outputText), '\r?\n', 'split');
+            pageStarts = find(contains(lines, "THEORETICAL ROCKET PERFORMANCE ASSUMING"));
+            if isempty(pageStarts)
+                shown = char(outputText);
+                error("No CEA results found in the CEA output. It starts: %s", shown(1:min(300, end)));
+            end
+            pageEnds = [pageStarts(2:end) - 1, numel(lines)];
+            cases = struct("eq", {}, "fr", {});
+            for p = 1:numel(pageStarts)
+                page = RocketEngine.parseCEAPage(lines(pageStarts(p):pageEnds(p)));
+                if page.isEquilibrium
+                    cases(end + 1).eq = page; %#ok<AGROW>
+                    cases(end).fr = [];
+                else
+                    if isempty(cases) || ~isempty(cases(end).fr)
+                        error("CEA output has a frozen page that doesn't follow an equilibrium page");
+                    end
+                    cases(end).fr = page;
+                end
+            end
+        end
     end
 
     %% Stages of solve()
@@ -899,7 +978,6 @@ classdef RocketEngine
                     args.p_amb (1, 1) double = NaN
                     args.pc double = 128 * 6894.76
                     args.MR double = 1.6
-                    args.expansion_ratio double = 1.8
                     args.mdot double = 1.2 * .45359237
                     args.d_channel double = 1.2E-3
                     args.num_channels double = 48
@@ -951,7 +1029,7 @@ classdef RocketEngine
                 error("All engines solved together must have the same fuel, oxidizer and material");
             end
 
-            inputNames = ["alt", "T_amb", "p_amb", "pc", "MR", "expansion_ratio", ...
+            inputNames = ["alt", "T_amb", "p_amb", "pc", "MR", ...
                 "mdot", "d_channel", "num_channels", "T_coolant_i", "t_wall", "CR", "Lstar", "thetaN", "fpct", "etaRc", ...
                 "DF_stress", "DF_temp", "DF_p_coolant"];
             for inputName = inputNames
@@ -959,85 +1037,395 @@ classdef RocketEngine
             end
         end
 
-        function gasProps = runCEA(inputs, fuel, oxidizer)
-        % Gets combustion gas state from CEA for every engine, calling CEA
-        % once per unique (pc, MR, expansion_ratio, CR)
+        function [gasProps, gasLine, inputs] = runCEA(inputs, fuel, oxidizer)
+        % Gets combustion gas state from CEA for every engine, in three
+        % stages, calling CEA only for each unique (pc, MR, CR, p_amb,
+        % thetaN, fpct, etaRc):
+        %   1) Small calls with the pressure ratio pc / p_amb, which return
+        %       the expansion ratio for exit pressure = ambient pressure
+        %   2) Area ratio of every contour station, from a unit throat
+        %       contour (area ratio doesn't depend on the throat size, so
+        %       no resizing is needed after the throat is sized)
+        %   3) Full calls at those area ratios, split into several calls
+        %       each (see numStations)
+        %                  gasProps, one value per engine
+        %                  gasLine, N x S arrays of state at every station
+        %                  inputs, the same with expansion_ratio added
         % -----------------------------------------------------------------
         % Assumptions
         %   1) CEA's inputs and outputs are English units, converted here
+        %   2) See Assumptions 10 and 11 of the class header. The frozen
+        %       exit gamma replaces the equilibrium one of the earlier
+        %       version in the thrust coefficient.
+        %   3) CEA's tables are matched to stations by area ratio, the
+        %       nearest one (stations closer than tol_arSchedule to one
+        %       another share a CEA point)
         % -----------------------------------------------------------------
             % Import RocketCEA library
             py.importlib.import_module("rocketcea");
 
-            CEAkeys = [inputs.pc, inputs.MR, inputs.expansion_ratio, inputs.CR];
-            [uniqueCEAKeys, ~, mapToUnique] = unique(CEAkeys, "rows");
-            numUniqueCEARuns = size(uniqueCEAKeys, 1);
+            numEngines = numel(inputs.pc);
+            psiPerPa = 0.000145038;
+            atmToPa = 101325;
 
-            fieldNames = ["MW_t", "gamma_t", "gamma_e", "gamma_c", "pe", ...
-                "Isp_theo", "T_c", "T_t", "T_e", "rho_t", "cp_t", "mu_t", ...
-                "k_t", "Pr_t", "cp_c", "mu_c", "k_c", "Pr_c", "cstar_theo"];
-            uniqueCEARuns = struct();
-            for fieldName = fieldNames
-                uniqueCEARuns.(fieldName) = zeros(numUniqueCEARuns, 1);
+            CEAkeys = [inputs.pc, inputs.MR, inputs.CR, inputs.p_amb, ...
+                inputs.thetaN, inputs.fpct, inputs.etaRc];
+            [uniqueCEAKeys, firstIdx, mapToUnique] = unique(CEAkeys, "rows", "first");
+            numUnique = size(uniqueCEAKeys, 1);
+
+            % One CEA object per contraction ratio, since CR is fixed when
+            % the object is made
+            ceaByCR = containers.Map("KeyType", "double", "ValueType", "any");
+            for CR = unique(uniqueCEAKeys(:, 3))'
+                ceaByCR(CR) = py.rocketcea.cea_obj.CEA_Obj(fuelName = fuel.name, oxName = oxidizer.name, fac_CR = CR);
             end
 
-            % 
-            ceaByCR = containers.Map("KeyType", "double", "ValueType", "any");
-            for u = 1:numUniqueCEARuns
+            %% Stage 1: expansion ratio of each case
+            % One call per (pc, CR, p_amb), with all of its MR's in a list
+            epsUnique = nan(numUnique, 1);
+            [uniqueGroups, ~, groupOf] = unique(uniqueCEAKeys(:, [1 3 4]), "rows");
+            for g = 1:size(uniqueGroups, 1)
+                members = find(groupOf == g);
+                pc = uniqueGroups(g, 1);
+                CR = uniqueGroups(g, 2);
+                p_amb = uniqueGroups(g, 3);
+                MRs = uniqueCEAKeys(members, 2);
+                cases = RocketEngine.callCEA(ceaByCR(CR), pc * psiPerPa, MRs, [], [], pc / p_amb, 1, 0);
+                if numel(cases) ~= numel(members)
+                    error("CEA returned %d cases for %d O/F's (pc = %g Pa, CR = %g)", numel(cases), numel(members), pc, CR);
+                end
+                for m = 1:numel(members)
+                    frozenBlock = cases(m).fr;
+                    if abs(cases(m).eq.OF - MRs(m)) > 1E-4 .* MRs(m) || isempty(frozenBlock) || numel(frozenBlock.T) ~= 4
+                        error("CEA's expansion ratio call for pc = %g Pa, O/F = %g, p_amb = %g Pa wasn't as expected. Is p_amb above the chamber end pressure?", pc, MRs(m), p_amb);
+                    end
+                    % The last column is the exit, at pc / p_amb
+                    epsUnique(members(m)) = frozenBlock.AeAt(end);
+                end
+            end
+            inputs.expansion_ratio = epsUnique(mapToUnique);
+
+            %% Stage 2: area ratio at every contour station
+            % Contour for a throat of radius 1, only to read area ratios
+            unitGeom = RocketEngine.buildContour(inputs, 2 .* ones(numEngines, 1), 1E3 .* ones(numEngines, 1));
+            [~, numStationsTotal] = size(unitGeom.r);
+            rThroat = unitGeom.r(sub2ind(size(unitGeom.r), (1:numEngines)', unitGeom.iThroat));
+            areaRatio = (unitGeom.r ./ rThroat).^2;
+
+            %% Stage 3: full CEA calls
+            if RocketEngine.useFrozenTransport
+                subsonicTransport = "fr";
+            else
+                subsonicTransport = "eq";
+            end
+            gasPropFields = ["MW_t", "gamma_t", "gamma_e", "gamma_c", "pe", ...
+                "Isp_theo", "T_c", "T_t", "T_e", "rho_t", "cp_t", "mu_t", ...
+                "k_t", "Pr_t", "cp_c", "mu_c", "k_c", "Pr_c", "cstar_theo"];
+            stateFields = ["M", "T", "P", "gamma", "mu", "k", "Pr", "cp", "rho"];
+            gasPropsUnique = struct();
+            for fieldName = gasPropFields
+                gasPropsUnique.(fieldName) = zeros(numUnique, 1);
+            end
+            gasLineUnique = struct();
+            for fieldName = stateFields
+                gasLineUnique.(fieldName) = zeros(numUnique, numStationsTotal);
+            end
+
+            for u = 1:numUnique
                 pc = uniqueCEAKeys(u, 1);
                 MR = uniqueCEAKeys(u, 2);
-                expansion_ratio = uniqueCEAKeys(u, 3);
-                CR = uniqueCEAKeys(u, 4);
-                if ~isKey(ceaByCR, CR)
-                    ceaByCR(CR) = py.rocketcea.cea_obj.CEA_Obj(fuelName = fuel.name, oxName = oxidizer.name, fac_CR = CR);
-                end
+                CR = uniqueCEAKeys(u, 3);
                 cea = ceaByCR(CR);
-                % Pa to psi
-                pc = pc * 0.000145038;
+                e = firstIdx(u);
+                iThroat = unitGeom.iThroat(e);
+                stationAR = areaRatio(e, :);
 
-                throatProps = double(cea.get_Throat_MolWt_gamma(Pc = pc, MR = MR, eps = expansion_ratio));
-                exitProps = double(cea.get_exit_MolWt_gamma(Pc = pc, MR = MR, eps = expansion_ratio));
-                chamberProps = double(cea.get_Chamber_MolWt_gamma(Pc = pc, MR = MR, eps = expansion_ratio));
-                % lbm/lbm-mol -> kg/mol
-                uniqueCEARuns.MW_t(u) = throatProps(1) * 1E-3;
-                uniqueCEARuns.gamma_t(u) = throatProps(2);
-                uniqueCEARuns.gamma_e(u) = exitProps(2);
-                uniqueCEARuns.gamma_c(u) = chamberProps(2);
+                % Distinct area ratios to ask CEA for
+                supList = RocketEngine.getAreaRatioSchedule(stationAR(1:iThroat), 1, Inf);
+                subList = RocketEngine.getAreaRatioSchedule(stationAR(iThroat + 1:end), 1, CR);
+                if isempty(supList)
+                    error("No supersonic stations found for engine %d", e);
+                end
 
-                uniqueCEARuns.pe(u) = pc / double(cea.get_PcOvPe(Pc = pc, MR = MR, eps = expansion_ratio));
-                uniqueCEARuns.Isp_theo(u) = double(cea.get_Isp(Pc = pc, MR = MR, eps = expansion_ratio));
+                % Supersonic stations, frozen at the throat. The first call
+                % also gives the chamber and throat (equilibrium)
+                supStates = [];
+                supChunks = RocketEngine.splitIntoChunks(supList, RocketEngine.maxSuparPerCall);
+                for c = 1:numel(supChunks)
+                    cases = RocketEngine.callCEA(cea, pc * psiPerPa, MR, supChunks{c}, [], [], 1, 1);
+                    if numel(cases) ~= 1 || isempty(cases(1).fr)
+                        error("CEA didn't return one frozen case for pc = %g Pa, O/F = %g. CEA drops the frozen results when a call has too many points, see numStations.", pc, MR);
+                    end
+                    frozenBlock = cases(1).fr;
+                    cols = RocketEngine.matchColumns(frozenBlock, 4, supChunks{c});
+                    supStates = RocketEngine.catStates(supStates, RocketEngine.getCEAState(frozenBlock, cols, "fr", atmToPa));
+                    if c == 1
+                        % Chamber end is column 2 and throat column 3
+                        chamberState = RocketEngine.getCEAState(cases(1).eq, 2, subsonicTransport, atmToPa);
+                        throatState = RocketEngine.getCEAState(cases(1).eq, 3, subsonicTransport, atmToPa);
+                        cstar = cases(1).eq.cstar(2) .* 0.3048;
+                    end
+                end
 
-                % deg R to K
-                temps = double(cea.get_Temperatures(Pc = pc, MR = MR, eps = expansion_ratio)) .* 5 ./ 9;
-                uniqueCEARuns.T_c(u) = temps(1);
-                uniqueCEARuns.T_t(u) = temps(2);
-                uniqueCEARuns.T_e(u) = temps(3);
-                % lbm/ft^3 -> kg/m^3
-                densities = double(cea.get_Densities(Pc = pc, MR = MR, eps = expansion_ratio)) .* 16.018463;
-                uniqueCEARuns.rho_t(u) = densities(2);
+                % Subsonic stations, equilibrium
+                subStates = [];
+                subChunks = RocketEngine.splitIntoChunks(subList, RocketEngine.maxSubarPerCall);
+                for c = 1:numel(subChunks)
+                    cases = RocketEngine.callCEA(cea, pc * psiPerPa, MR, [], subChunks{c}, [], 0, 1);
+                    if numel(cases) ~= 1
+                        error("CEA returned %d cases for the subsonic area ratios at pc = %g Pa, O/F = %g", numel(cases), pc, MR);
+                    end
+                    cols = RocketEngine.matchColumns(cases(1).eq, 4, subChunks{c});
+                    subStates = RocketEngine.catStates(subStates, RocketEngine.getCEAState(cases(1).eq, cols, subsonicTransport, atmToPa));
+                end
 
-                % Transport properties: [cp, mu, k, Pr]
-                throatTrans = double(cea.get_Throat_Transport(Pc = pc, MR = MR, eps = expansion_ratio));
-                chamberTrans = double(cea.get_Chamber_Transport(Pc = pc, MR = MR, eps = expansion_ratio));
-                % Btu/lbm-degR to J/kg-K
-                uniqueCEARuns.cp_t(u) = throatTrans(1) * 1055.06 / (.453592 / 1.8);
-                uniqueCEARuns.cp_c(u) = chamberTrans(1) * 1055.06 / (.453592 / 1.8);
-                % milipoise to Pa-s
-                uniqueCEARuns.mu_t(u) = throatTrans(2) * 1E-4;
-                uniqueCEARuns.mu_c(u) = chamberTrans(2) * 1E-4;
-                % millicalories / (cm-K-sec) to W/m-K
-                uniqueCEARuns.k_t(u) = throatTrans(3) * .4184;
-                uniqueCEARuns.k_c(u) = chamberTrans(3) * .4184;
-                uniqueCEARuns.Pr_t(u) = throatTrans(4);
-                uniqueCEARuns.Pr_c(u) = chamberTrans(4);
+                % Tables of state against area ratio, throat first
+                nozzleTable = RocketEngine.catStates(throatState, supStates);
+                nozzleTable.ar = [1; supList(:)];
+                chamberTable = RocketEngine.catStates(throatState, subStates);
+                chamberTable = RocketEngine.catStates(chamberTable, chamberState);
+                chamberTable.ar = [1; subList(:); CR];
 
-                % ft/s -> m/s
-                uniqueCEARuns.cstar_theo(u) = double(cea.get_Cstar(Pc = pc, MR = MR)) * .3048;
+                % Spread onto the stations
+                nozzleIdx = 1:iThroat;
+                chamberIdx = iThroat + 1:numStationsTotal;
+                nozzleLookup = RocketEngine.nearestIndex(nozzleTable.ar, stationAR(nozzleIdx));
+                chamberLookup = RocketEngine.nearestIndex(chamberTable.ar, stationAR(chamberIdx));
+                for fieldName = stateFields
+                    gasLineUnique.(fieldName)(u, nozzleIdx) = nozzleTable.(fieldName)(nozzleLookup)';
+                    gasLineUnique.(fieldName)(u, chamberIdx) = chamberTable.(fieldName)(chamberLookup)';
+                end
+
+                % Single values
+                gasPropsUnique.MW_t(u) = throatState.MW;
+                gasPropsUnique.gamma_t(u) = throatState.gamma;
+                gasPropsUnique.gamma_e(u) = supStates.gamma(end);
+                gasPropsUnique.gamma_c(u) = chamberState.gamma;
+                gasPropsUnique.pe(u) = supStates.P(end);
+                gasPropsUnique.Isp_theo(u) = supStates.Ivac(end);
+                gasPropsUnique.T_c(u) = chamberState.T;
+                gasPropsUnique.T_t(u) = throatState.T;
+                gasPropsUnique.T_e(u) = supStates.T(end);
+                gasPropsUnique.rho_t(u) = throatState.rho;
+                gasPropsUnique.cp_t(u) = throatState.cp;
+                gasPropsUnique.mu_t(u) = throatState.mu;
+                gasPropsUnique.k_t(u) = throatState.k;
+                gasPropsUnique.Pr_t(u) = throatState.Pr;
+                gasPropsUnique.cp_c(u) = chamberState.cp;
+                gasPropsUnique.mu_c(u) = chamberState.mu;
+                gasPropsUnique.k_c(u) = chamberState.k;
+                gasPropsUnique.Pr_c(u) = chamberState.Pr;
+                gasPropsUnique.cstar_theo(u) = cstar;
             end
 
             % Spread back out to one value per engine
-            for fieldName = fieldNames
-                gasProps.(fieldName) = uniqueCEARuns.(fieldName)(mapToUnique);
+            for fieldName = gasPropFields
+                gasProps.(fieldName) = gasPropsUnique.(fieldName)(mapToUnique);
+            end
+            for fieldName = stateFields
+                gasLine.(fieldName) = gasLineUnique.(fieldName)(mapToUnique, :);
+            end
+            gasLine.AR = areaRatio;
+            gasLine.subsonic = (1:numStationsTotal) > unitGeom.iThroat;
+        end
+
+        function cases = callCEA(cea, pcPsi, MR, supar, subar, PcOvPe, frozen, showTransport)
+        % One get_full_cea_output call, parsed. Empty supar, subar or PcOvPe
+        % are left out of the CEA input (None).
+        %   frozen, 1 = frozen after the throat (frozen = 1 and
+        %       frozenAtThroat = 1), 0 = equilibrium throughout
+        % -----------------------------------------------------------------
+        % Assumptions
+        %   1) cea is a variable, not a chained call: chaining the method
+        %       onto ceaByCR(CR) passes the name = value arguments wrong
+        % -----------------------------------------------------------------
+            optional = {supar, subar, PcOvPe};
+            for j = 1:numel(optional)
+                if isempty(optional{j})
+                    optional{j} = py.None;
+                else
+                    optional{j} = double(optional{j}(:)');
+                end
+            end
+            outputText = cea.get_full_cea_output(Pc = pcPsi, MR = double(MR(:)'), ...
+                eps = optional{1}, subar = optional{2}, PcOvPe = optional{3}, ...
+                frozen = frozen, frozenAtThroat = frozen, short_output = 1, ...
+                show_transport = showTransport);
+            cases = RocketEngine.parseCEAOutput(char(outputText));
+        end
+
+        function schedule = getAreaRatioSchedule(areaRatios, lowerLimit, upperLimit)
+        % Distinct area ratios, ascending, strictly between the limits
+        % (those within tol_arSchedule of a limit are left out). Area
+        % ratios within tol_arSchedule of each other are merged, keeping the
+        % larger one (so the nozzle exit is kept)
+            tol = RocketEngine.tol_arSchedule;
+            candidates = sort(areaRatios(:), "descend");
+            candidates = candidates(candidates > lowerLimit .* (1 + tol) & candidates < upperLimit .* (1 - tol));
+            schedule = zeros(0, 1);
+            for k = 1:numel(candidates)
+                if isempty(schedule) || candidates(k) < schedule(end) .* (1 - tol)
+                    schedule(end + 1, 1) = candidates(k); %#ok<AGROW>
+                end
+            end
+            schedule = flip(schedule);
+        end
+
+        function chunks = splitIntoChunks(values, maxPerChunk)
+        % Splits a list into a cell array of consecutive pieces of at most
+        % maxPerChunk
+            values = values(:);
+            numChunks = ceil(numel(values) ./ maxPerChunk);
+            chunks = cell(1, numChunks);
+            for c = 1:numChunks
+                chunks{c} = values((c - 1) .* maxPerChunk + 1:min(c .* maxPerChunk, numel(values)));
+            end
+        end
+
+        function cols = matchColumns(block, firstColumn, requested)
+        % Columns of a CEA block (from firstColumn on) whose area ratio is
+        % each requested one, in the order requested
+            candidates = firstColumn:numel(block.T);
+            candidateAR = block.AeAt(candidates);
+            requested = requested(:)';
+            [relErr, k] = min(abs(candidateAR(:) - requested) ./ requested, [], 1);
+            if numel(candidates) < numel(requested) || any(relErr > RocketEngine.tol_arSchedule ./ 2) || numel(unique(k)) < numel(k)
+                error("CEA's area ratios (%s) don't match the requested ones (%s)", ...
+                    num2str(candidateAR(:)', "%g "), num2str(requested, "%g "));
+            end
+            cols = candidates(k);
+        end
+
+        function idx = nearestIndex(tableValues, queryValues)
+        % For each query value, the index of the nearest table value
+            [~, idx] = min(abs(queryValues(:) - tableValues(:)'), [], 2);
+        end
+
+        function states = catStates(a, b)
+        % Stacks two state structs (see getCEAState) into one
+            if isempty(a)
+                states = b;
+                return;
+            elseif isempty(b)
+                states = a;
+                return;
+            end
+            states = a;
+            for fieldName = string(fieldnames(b))'
+                states.(fieldName) = [a.(fieldName); b.(fieldName)];
+            end
+        end
+
+        function state = getCEAState(block, cols, transport, atmToPa)
+        % Gas state at the columns of a parsed CEA block, in SI
+        %   transport, "eq" or "fr": which cp, k and Pr rows to use
+            if transport == "eq"
+                cp = block.cpEq;
+                k = block.kEq;
+                Pr = block.PrEq;
+            else
+                cp = block.cpFr;
+                k = block.kFr;
+                Pr = block.PrFr;
+            end
+            state.M = block.mach(cols)';
+            state.T = block.T(cols)';
+            % atm to Pa
+            state.P = block.P(cols)' .* atmToPa;
+            % g/cc to kg/m^3
+            state.rho = block.rho(cols)' .* 1000;
+            % g/mol to kg/mol
+            state.MW = block.MW(cols)' .* 1E-3;
+            state.gamma = block.gamma(cols)';
+            % millipoise to Pa-s
+            state.mu = block.mu(cols)' .* 1E-4;
+            % cal/g-K to J/kg-K
+            state.cp = cp(cols)' .* 4184;
+            % millicalories / (cm-K-sec) to W/m-K
+            state.k = k(cols)' .* .4184;
+            state.Pr = Pr(cols)';
+            % s (CEA's LB-SEC/LB)
+            state.Ivac = block.Ivac(cols)';
+        end
+
+        function page = parseCEAPage(pageLines)
+        % Reads one page of CEA's output, see parseCEAOutput
+            page = struct();
+            page.isEquilibrium = contains(pageLines{1}, "ASSUMING EQUILIBRIUM");
+            rowKeys = ["PinjOvP", "P", "T", "rho", "MW", "gamma", "mach", "mu", ...
+                "cp", "k", "Pr", "AeAt", "cstar", "CF", "Ivac", "Isp"];
+            rowLabels = ["Pinj/P", "P, ATM", "T, K", "RHO, G/CC", "MW, MOL WT", ...
+                "GAMMAs", "MACH NUMBER", "VISC,MILLIPOISE", "Cp, CAL/(G)(K)", ...
+                "CONDUCTIVITY", "PRANDTL NUMBER", "Ae/At", "CSTAR, FT/SEC", "CF", ...
+                "Ivac,LB-SEC/LB", "Isp, LB-SEC/LB"];
+            % The transport rows come in sections
+            section = "thermo";
+            for i = 1:numel(pageLines)
+                text = strtrim(pageLines{i});
+                if startsWith(text, "Pinj =")
+                    page.Pinj = str2double(regexp(text, '[-+]?\d+\.?\d*', 'match', 'once'));
+                elseif startsWith(text, "O/F=")
+                    page.OF = str2double(regexp(text, '[-+]?\d+\.?\d*', 'match', 'once'));
+                elseif startsWith(text, "WITH EQUILIBRIUM REACTIONS")
+                    section = "eq";
+                elseif startsWith(text, "WITH FROZEN REACTIONS")
+                    section = "fr";
+                elseif startsWith(text, "PERFORMANCE PARAMETERS")
+                    section = "perf";
+                elseif startsWith(text, "MOLE FRACTIONS")
+                    break;
+                else
+                    for j = 1:numel(rowLabels)
+                        if startsWith(text, rowLabels(j))
+                            values = RocketEngine.getCEAValues(extractAfter(text, strlength(rowLabels(j))));
+                            % Lines like "CONDUCTIVITY IN UNITS OF" have no values
+                            if isempty(values)
+                                break;
+                            end
+                            key = rowKeys(j);
+                            if any(key == ["cp", "k", "Pr"])
+                                if key == "cp" && section == "thermo"
+                                    key = "cpThermo";
+                                else
+                                    key = key + upper(extractBefore(section, 2)) + extractAfter(section, 1);
+                                end
+                            end
+                            page.(key) = values;
+                            break;
+                        end
+                    end
+                end
+            end
+
+            if ~isfield(page, "T") || ~isfield(page, "P") || ~isfield(page, "AeAt")
+                error("A page of the CEA output is missing its temperature, pressure or area ratio row");
+            end
+            numColumns = numel(page.T);
+            % Performance rows skip the injector column, so pad them
+            for key = ["AeAt", "cstar", "CF", "Ivac", "Isp"]
+                if isfield(page, key)
+                    page.(key) = [NaN, page.(key)];
+                end
+            end
+            for key = string(fieldnames(page))'
+                if isnumeric(page.(key)) && numel(page.(key)) > 1 && numel(page.(key)) ~= numColumns
+                    error("CEA output row %s has %d values on a page of %d columns. The page may be split into blocks of columns.", key, numel(page.(key)), numColumns);
+                end
+            end
+        end
+
+        function values = getCEAValues(text)
+        % The numbers in a line of CEA output. CEA writes small ones without
+        % the E, like 1.3106-3
+            tokens = regexp(text, '[-+]?\d+\.\d+(?:[-+]\d+)?', 'match');
+            values = zeros(1, numel(tokens));
+            for i = 1:numel(tokens)
+                parts = regexp(tokens{i}, '^([-+]?\d+\.\d+)([-+]\d+)$', 'tokens', 'once');
+                if isempty(parts)
+                    values(i) = str2double(tokens{i});
+                else
+                    values(i) = str2double(parts{1}) .* 10 .^ str2double(parts{2});
+                end
             end
         end
 
@@ -1168,6 +1556,8 @@ classdef RocketEngine
         end
 
         function gasLine = getGasAlongContour(geom, gasProps)
+        % NOT CALLED ANYMORE: runCEA gets the gas state at every station from
+        % CEA itself. Kept as the ideal gas version, as a cross check.
         % Combustion gas Mach number, static temperature and transport
         % properties at every station
         % -----------------------------------------------------------------

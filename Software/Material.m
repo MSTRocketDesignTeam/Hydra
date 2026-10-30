@@ -91,7 +91,7 @@ classdef Material
             return;
         end
 
-        function k = get_k(obj, T)
+        function k = getK(obj, T)
         % Gets thermal conductivity at temperature T in W(/m-K)
         % -----------------------------------------------------------------
         % Arguments
