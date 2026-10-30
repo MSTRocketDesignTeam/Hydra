@@ -1,5 +1,8 @@
 % RocketEngine debug script
 
+clc
+clear
+
 name = "Bombaclat";
 
 fuel = Propellant("ETHANOL_L");
@@ -8,11 +11,10 @@ material = Material("AlSi10Mg");
 
 alt = 500;
 
-var_range = [1, 1.1, 1.2];
+var_range = [1];
 
-pc_array = [800] * var_range * 6894.76; % Pa
+pc_array = [800] * var_range * 6894.76; % psi to Pa
 MR_array = [5] * var_range;
-expansion_ratio_array = [8] * var_range;
 mdot_array = [5] * var_range; % kg/s
 d_channel_array = [1.2] * 1E-3; % m
 num_channels_array = [50] * var_range;
@@ -22,7 +24,6 @@ CR_array = [6] * var_range;
 
 rckt = RocketEngine(pc = pc_array, ...
     MR = MR_array, ...
-    expansion_ratio = expansion_ratio_array, ...
     mdot = mdot_array, ...
     d_channel = d_channel_array, ...
     num_channels = num_channels_array, ...
