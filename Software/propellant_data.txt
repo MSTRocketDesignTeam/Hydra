@@ -7,7 +7,7 @@ BEGIN INSTRUCTIONS
 	phase:		<"LIQUID", "GAS">,			~
 	type:		<"OXIDIZER", "FUEL">,			~
 	cost:		cost per unit mass,			USD/kg
-	mlr_wgt:	molar weight,				kg/mol
+	MW:	        molar weight,				kg/mol
 	T_crit:		critical temperature,			K
 	P_crit:		critical pressure,			Pa
 	rho_crit:	critical density,			kg/m^3
@@ -46,7 +46,7 @@ name = <value>
 phase = <value>
 type = <value>
 cost = <value>
-mlr_wgt = <value>
+MW = <value>
 T_crit = <value>
 P_crit = <value>
 rho_crit = <value>
@@ -76,7 +76,7 @@ name = "ETHANOL"
 phase = "LIQUID"
 type = "FUEL"
 cost = 1.0141
-mlr_wgt = 0.0460684
+MW = 0.0460684
 T_crit = 514
 P_crit = 6.14E6
 rho_crit = 276
@@ -100,6 +100,6 @@ name = "N2O"
 phase = "LIQUID"
 type = "OXIDIZER"
 cost = 13.2277
-mlr_wgt = 0.04401
+MW = 0.04401
 cp = 880
 \END\

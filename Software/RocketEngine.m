@@ -133,14 +133,14 @@ classdef RocketEngine
         R_universal = 8.314; % Universal gas constant, J/kg-K
         p_SL = 101325; % Total air pressure of still air at sea level, Pa
         T_SL = 288.15; % Total temperature of still air at sea level, K
-        mlr_wgt_air = 0.02896968; % Molar weight of air, kg/mol
+        MW_air = 0.02896968; % Molar weight of air, kg/mol
         lapse_rate = 0.00976; % Temperature lapse rate with altitude used for ambient pressure calculation, K/m
 
         % Number of axial stations in each section of the contour. These set
         % the size of every station array, so they're shared by all engines
         %
         % CEA is asked for the gas state at the area ratio of every station.
-        % The distinct area ratios it must report are
+        % The distinct area ratios it must report are:
         %   supersonic: nozzleParabolic + nozzleCircular - 2 (the throat and
         %       the duplicate station where the two sections meet; the exit
         %       is one of them)
@@ -153,9 +153,14 @@ classdef RocketEngine
         % calls (maxSuparPerCall, maxSubarPerCall), so there is no hard cap
         % on these numbers. Every 3 more supersonic or 4 more subsonic
         % stations is one more CEA call per (pc, MR) case.
+        % calls = ceil(nSup / 3) + ceil(nSub / 4)
+        % Where:
+        %   nSup = # of stations in nozzleParabolic + # of stations in nozzleCircular − 2, and
+        %   nSub = # of stations in chamberCircular + # of stations in chamberParabolic − 3
+        %
         numStations = struct("nozzleParabolic", 5, ...
             "nozzleCircular", 5, "chamberCircular", 5, ...
-            "chamberParabolic", 5, "chamberLinear", 5);
+            "chamberParabolic", 5, "chamberLinear", 2);
 
         % Reynolds number at which pipe flow is considered to transition
         % from laminar to turbulent with the pipe diameter as the
@@ -505,7 +510,7 @@ classdef RocketEngine
             RocketEngine.requireArgs(args, "alt");
             alt = args.alt;
 
-            p_amb = RocketEngine.p_SL .* (1 + (RocketEngine.lapse_rate .* alt) ./ RocketEngine.T_SL).^(-RocketEngine.g0 .* RocketEngine.mlr_wgt_air ./ (RocketEngine.R_universal .* RocketEngine.lapse_rate));
+            p_amb = RocketEngine.p_SL .* (1 + (RocketEngine.lapse_rate .* alt) ./ RocketEngine.T_SL).^(-RocketEngine.g0 .* RocketEngine.MW_air ./ (RocketEngine.R_universal .* RocketEngine.lapse_rate));
         end
 
         function sigma = GetBartzCorrectionFactor(args)

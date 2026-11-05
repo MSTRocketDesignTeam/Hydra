@@ -58,7 +58,7 @@ classdef Propellant
         phase % "LIQUID" or "GAS"
         type % "FUEL" or "OXIDIZER"
         cost % Cost per unit mass (USD/kg)
-        mlr_wgt % Molar weight (kg/mol)
+        MW % Molar weight (kg/mol)
         T_crit % Critical temperature (K)
         P_crit % Critical pressure (Pa)
         rho_crit % Critical density (kg/m^3)
@@ -253,7 +253,7 @@ classdef Propellant
             Zc = coeffs(1);
             Vc = Zc .* Propellant.R_universal .* obj.T_crit ./ obj.P_crit;
             Tr = T ./ obj.T_crit;
-            rho = obj.mlr_wgt ./ (Vc .* Zc.^((1 - Tr).^(2 ./ 7)));
+            rho = obj.MW ./ (Vc .* Zc.^((1 - Tr).^(2 ./ 7)));
         end
 
         function k = modelAssaelEthanolK(obj, coeffs, T, rho)
@@ -353,7 +353,7 @@ classdef Propellant
             for i = 0:6
                 Bstar = Bstar + coeffs(11 + i) .* Tstar.^(-.25 .* i);
             end
-            B_eta = Bstar .* Propellant.NA .* coeffs(10).^3 ./ obj.mlr_wgt;
+            B_eta = Bstar .* Propellant.NA .* coeffs(10).^3 ./ obj.MW;
             eta1 = eta0 .* B_eta;
 
             % Residual viscosity
