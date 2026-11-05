@@ -103,7 +103,7 @@ classdef Material
             k = obj.evalProperty("k", T);
         end
 
-        function sigma_y = get_sigma_y(obj, T)
+        function sigma_y = getSigmaY(obj, T)
         % Gets yield stress at temperature T in Pa
         % -----------------------------------------------------------------
         % Arguments

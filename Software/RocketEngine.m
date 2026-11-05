@@ -273,9 +273,9 @@ classdef RocketEngine
 
             % Propellants and material, from config name or passed in
             % object
-            fuel = RocketEngine.asObject(args.fuel, "Propellant");
-            oxidizer = RocketEngine.asObject(args.oxidizer, "Propellant");
-            material = RocketEngine.asObject(args.material, "Material");
+            fuel = args.fuel;
+            oxidizer = args.oxidizer;
+            material = args.material;
             if fuel.type ~= "FUEL"
                 error("Propellant ""%s"" is type ""%s"", but was passed as the fuel", fuel.name, fuel.type);
             end
@@ -395,7 +395,7 @@ classdef RocketEngine
             coolant = RocketEngine.getCoolantInlet(inputs, fuel);
 
             %% Throat estimate (lumped, Dittus-Boelter on both sides)
-            wall = RocketEngine.getThroatEstimate(inputs, gasProps, perf, coolant);
+            wall = RocketEngine.getThroatEstimate(inputs, material, gasProps, perf, coolant);
             % Crude worst case coolant temperature rise: throat heat flux
             % at every cross section of the whole channel
             % (kept as it was in regenEngineTradesCalculator.m)
@@ -970,9 +970,9 @@ classdef RocketEngine
         function args = parseArgs(args)
                 arguments
                     args.name = "Hydra"
-                    args.fuel = "ETHANOL_L"
-                    args.oxidizer = "N2O_L"
-                    args.material = "AlSi10Mg"
+                    args.fuel (1, 1) Propellant = Propellant("ETHANOL_L")
+                    args.oxidizer (1, 1) Propellant = Propellant("N2O_L")
+                    args.material (1, 1) Material = Material("AlSi10Mg")
                     args.alt (1, 1) double = 342
                     args.T_amb (1, 1) double = 273.15 + 20
                     args.p_amb (1, 1) double = NaN
@@ -1003,7 +1003,7 @@ classdef RocketEngine
                 end
             end
         end
-
+        %{
         function obj = asObject(value, className)
         % Makes a Propellant or Material from a config name, or passes
         % through one that's already made
@@ -1018,6 +1018,7 @@ classdef RocketEngine
                 error("Expected a single %s", className);
             end
         end
+        %}
 
         function inputs = organizeInputs(objs)
         % Collects every engine's design inputs into column vectors
@@ -1352,9 +1353,9 @@ classdef RocketEngine
         % Reads one page of CEA's output, see parseCEAOutput
             page = struct();
             page.isEquilibrium = contains(pageLines{1}, "ASSUMING EQUILIBRIUM");
-            rowKeys = ["PinjOvP", "P", "T", "rho", "MW", "gamma", "mach", "mu", ...
+            rowKeys = ["PinjOvP", "P", "T", "rho", "Mn", "MW", "gamma", "mach", "mu", ...
                 "cp", "k", "Pr", "AeAt", "cstar", "CF", "Ivac", "Isp"];
-            rowLabels = ["Pinj/P", "P, ATM", "T, K", "RHO, G/CC", "MW, MOL WT", ...
+            rowLabels = ["Pinj/P", "P, ATM", "T, K", "RHO, G/CC", "M, (1/n)", "MW, MOL WT", ...
                 "GAMMAs", "MACH NUMBER", "VISC,MILLIPOISE", "Cp, CAL/(G)(K)", ...
                 "CONDUCTIVITY", "PRANDTL NUMBER", "Ae/At", "CSTAR, FT/SEC", "CF", ...
                 "Ivac,LB-SEC/LB", "Isp, LB-SEC/LB"];
@@ -1400,6 +1401,16 @@ classdef RocketEngine
             if ~isfield(page, "T") || ~isfield(page, "P") || ~isfield(page, "AeAt")
                 error("A page of the CEA output is missing its temperature, pressure or area ratio row");
             end
+
+            % CEA only prints MW, MOL WT when it differs from M, (1/n), so
+            % without it they're the same
+            if ~isfield(page, "MW")
+                if ~isfield(page, "Mn")
+                    error("A page of the CEA output has neither an M, (1/n) nor an MW, MOL WT row");
+                end
+                page.MW = page.Mn;
+            end
+
             numColumns = numel(page.T);
             % Performance rows skip the injector column, so pad them
             for key = ["AeAt", "cstar", "CF", "Ivac", "Isp"]
@@ -1625,7 +1636,7 @@ classdef RocketEngine
             coolant.Pr = coolant.cp .* coolant.mu ./ coolant.k;
         end
 
-        function wall = getThroatEstimate(in, gasProps, perf, coolant)
+        function wall = getThroatEstimate(in, material, gasProps, perf, coolant)
         % Quick lumped estimate of heat flux and wall temperatures at the
         % throat. Cheaper than the station-wise solution
         % -----------------------------------------------------------------
@@ -1653,7 +1664,7 @@ classdef RocketEngine
             % Need k to get T_wg_throat, but need T_wg_throat to get k, so
             % iterate with T_wg_avg_guess until that temperature predicts
             for i = 1:RocketEngine.maxIter_T_wg
-                k_wall = in.material.get_k(T_wg_avg_guess);
+                k_wall = material.getK(T_wg_avg_guess);
                 TR_lumped = 1 ./ h_g + in.t_wall ./ k_wall + 1 ./ h_l ./ ((perf.dt + in.t_wall) ./ perf.dt);
                 wall.q_throat = (gasProps.T_t - in.T_coolant_i) ./ TR_lumped;
                 wall.T_wg_throat = gasProps.T_t - wall.q_throat ./ h_g;
@@ -1723,7 +1734,7 @@ classdef RocketEngine
             TR_l = RocketEngine.GetThermalResistance(heat_transfer_type = "forced convection", h = h_l, r_0 = r, r_1 = r + t);
 
             T_wg_guess = .5 .* Tg;
-            k_wall = material.get_k(T_wg_guess);
+            k_wall = material.getK(T_wg_guess);
 
             active = true(N, S);
             T_wg = nan(N, S);
@@ -1744,7 +1755,7 @@ classdef RocketEngine
                 T_wg_calc = Tg - q_calc .* TR_g;
                 T_wl_calc = in.T_coolant_i + q_calc .* TR_l;
 
-                k_wall = material.get_k(.5 .* (T_wg_calc + T_wl_calc));
+                k_wall = material.getK(.5 .* (T_wg_calc + T_wl_calc));
                 TR_w = RocketEngine.GetThermalResistance(heat_transfer_type = "conduction", k = k_wall, r_0 = r, r_1 = r, r_2 = r + t);
                 q_calc = (Tg - in.T_coolant_i) ./ (TR_g + TR_w + TR_l);
                 T_wg_calc = Tg - q_calc .* TR_g;

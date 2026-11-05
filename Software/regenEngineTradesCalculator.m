@@ -109,6 +109,8 @@ list_var_names = ["pc_c";
                   "k_wall"];
 
 %% Independent Variable Nominal ValuesT_coolant_nom
+% Doesn't work for just one value in current state, bad vectorization
+% implementation. Use [1, 1.1]' and pull values from subindex:(1, 1, 1, 1, 1, 1, 1, 1, 1)
 std_var_range = [1, 1.1]';
 high_def_var_range = linspace(.8, 1.2, 3)';
 % std_var_range = highdefvarrange;
@@ -208,12 +210,14 @@ for i_range = starting_i_range:length(ranges)
 end
 
 % Reassign changed ranges to original so they're now properly resized
-mdot_range = ranges_copy.mdot_range;
-d_channel_range = ranges_copy.d_channel_range;
-num_channels_range = ranges_copy.num_channels_range;
-T_coolant_i_range = ranges_copy.T_coolant_i_range;
-wall_t_range = ranges_copy.wall_t_range;
-k_wall_range = ranges_copy.k_wall_range;
+if exist("ranges_copy", "var")
+    mdot_range = ranges_copy.mdot_range;
+    d_channel_range = ranges_copy.d_channel_range;
+    num_channels_range = ranges_copy.num_channels_range;
+    T_coolant_i_range = ranges_copy.T_coolant_i_range;
+    wall_t_range = ranges_copy.wall_t_range;
+    k_wall_range = ranges_copy.k_wall_range;
+end
 
 % Eliminates trailing singleton dimensions in range_lengths
 for i = length(ranges):-1:1
@@ -275,7 +279,7 @@ rho_crit_eth = 276;
 fT_r = @(T, T_crit) T ./ T_crit;
 % Uses Rackett equation for density
 % Can't actually find a way to access this paper, but here's the citation
-% Rackett, H.G. (1970) — "Equation of State for Saturated Liquids", J. Chem. Eng. Data, 15(4), 514–517.
+%   Rackett, H.G. (1970) — "Equation of State for Saturated Liquids", J. Chem. Eng. Data, 15(4), 514–517.
 fDensity = @(mlr_wgt, Vc, Zc, T, T_crit) mlr_wgt ./ (Vc .* Zc.^((1 - fT_r(T, T_crit)).^(2 ./ 7)));
 % -------------------------------------------------------------------------
 % For coolant thermal conductivity calcs later - all these functions are
