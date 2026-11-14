@@ -1,12 +1,17 @@
 % The RocketEngine class object stores data about a physical rocket engine,
 % like its geometry, material information, propellant information,
-% performance metrics, etc. It takes design inputs, and computes combustion
-% gas properties with RocketCEA (a Python wrapper for NASA CEA), as well as
-% performance metrics, the physical engine contour (chamber, throat, and
-% nozzle), coolant channel flow properties, wall temperatures, and stress
-% estimates (physical and thermal).
+% performance metrics, etc. It takes design inputs, and computes:
+% a) Combustion gas properties with RocketCEA (a Python wrapper for NASA 
+%       CEA)
+% b) Performance metrics
+% c) The physical engine contour (chamber, throat, and nozzle)
+% d) Coolant channel flow properties
+% e) Wall temperatures
+% f) stress estimates (physical and thermal)
 % -------------------------------------------------------------------------
 % Dependencies
+% Some additional files are required to use this class, listed below.
+% Sub-dependencies (dependencies of dependencies) are not listed.
 %   1) Propellant.m
 %   2) Material.m
 %   3) RocketCEA 1.2.1 (Python library)
@@ -45,13 +50,13 @@
 %   8) Hoop stress estimates use a thin wall assumption
 %   9) Vectorization: all engines in an array are solved at the same time
 %       and must share fuel, oxidizer and material. CEA is not
-%       vectorizable, so it is called only for each unique (pc, MR, CR,
-%       p_amb, thetaN, fpct, etaRc), in a few small calls each (see
+%       vectorizable, so it is called only for each unique (p_c, MR, CR,
+%       p_a, thetaN, fpct, etaRc), in a few small calls each (see
 %       runCEA).
 %   10) The nozzle is ideally expanded at the design altitude: the exit
-%       pressure equals the ambient pressure p_amb. CEA is given the
-%       pressure ratio pc / p_amb and returns the expansion ratio, so
-%       expansion_ratio is an output, not an input. pc is the injector face
+%       pressure equals the ambient pressure p_a. CEA is given the
+%       pressure ratio p_c / p_a and returns the expansion ratio, so
+%       expansion_ratio is an output, not an input. p_c is the injector face
 %       pressure (CEA's Pinj), the small pressure drop to the end of the
 %       chamber is kept.
 %   11) The exhaust is frozen from the throat on (CEA frozen = 1 and
@@ -62,7 +67,7 @@
 %   2) Constructing with array inputs makes an N-D array of engines. Each
 %       input that has more than one element is a sweep dimension, in the
 %       order of RocketEngine.sweepNames. Inputs with one element are held
-%       constant. E.g. pc with 3 values and t_wall with 2 gives a 3x2
+%       constant. E.g. p_c with 3 values and t_wall with 2 gives a 3x2
 %       array.
 %   3) Results are grouped in structs: gas (CEA), perf (performance), geom
 %       (geometry and contour), coolant (inlet coolant state) and wall
@@ -109,9 +114,15 @@
 %       impossible engines, just create a log file for those and skip the
 %       rest of their computations. Additionally, expand which variables
 %       the user can sweep through
+%   9) Currently there's no assumption stating that each configuration
+%       passed into the constructor must have the same material, fuel, and
+%       oxidizer, even though the code assumes this. In the mean time, this
+%       assumption should be listed, and then eventually, it should be
+%       removed, and the code should not require this
+%   10) buildContour's comment on "See Assumption 5" should be updated
 % -------------------------------------------------------------------------
 % Nomenclature
-%   pc = chamber pressure (Pa)
+%   p_c = chamber pressure (Pa)
 %   MR = oxidizer to fuel mixture ratio by mass
 %   Tr = reduced temperature
 %   T_wg = hot wall temperature at the gas side (K)
@@ -152,7 +163,7 @@ classdef RocketEngine
         % has more than 3 extra points. runCEA splits the lists across
         % calls (maxSuparPerCall, maxSubarPerCall), so there is no hard cap
         % on these numbers. Every 3 more supersonic or 4 more subsonic
-        % stations is one more CEA call per (pc, MR) case.
+        % stations is one more CEA call per (p_c, MR) case.
         % calls = ceil(nSup / 3) + ceil(nSub / 4)
         % Where:
         %   nSup = # of stations in nozzleParabolic + # of stations in nozzleCircular − 2, and
@@ -160,7 +171,7 @@ classdef RocketEngine
         %
         numStations = struct("nozzleParabolic", 5, ...
             "nozzleCircular", 5, "chamberCircular", 5, ...
-            "chamberParabolic", 5, "chamberLinear", 2);
+            "chamberParabolic", 5, "chamberLinear", 1);
 
         % Reynolds number at which pipe flow is considered to transition
         % from laminar to turbulent with the pipe diameter as the
@@ -190,7 +201,7 @@ classdef RocketEngine
 
         % Names of the inputs that can be swept, in the order of the dimensions
         % of the engine array
-        sweepNames = ["pc", "MR", "mdot", "d_channel", ...
+        sweepNames = ["p_c", "MR", "mdot", "d_channel", ...
             "num_channels", "T_coolant_i", "t_wall", "CR"];
     end
 
@@ -201,7 +212,7 @@ classdef RocketEngine
         % Environment
         alt = 0; % Altitude above sea level
         T_amb = RocketEngine.T_SL; % Ambient temperature, K
-        p_amb = RocketEngine.p_SL; % Ambient pressure, Pa
+        p_a = RocketEngine.p_SL; % Ambient pressure, Pa
 
         % Information about the material the engine is made of
         material Material % Material class object
@@ -211,7 +222,7 @@ classdef RocketEngine
         oxidizer Propellant % Engine oxidizer propellant, Propellant class object
 
         % Design inputs
-        pc = []; % Chamber pressure, Pa
+        p_c = []; % Chamber pressure, Pa
         MR = []; % Oxidizer to fuel mass ratio
         expansion_ratio = []; % Nozzle exit area to throat area, computed by solve for exit pressure = ambient pressure
         mdot = []; % Total propellant mass flow rate, kg/s
@@ -232,10 +243,10 @@ classdef RocketEngine
 
         % Parameters for Rao approximation for bell nozzle contour design
         fpct = 1; % Nozzle length as fraction of a 15 deg half-angle conical nozzle
-        thetaN = 20; % Nozzle parabola initial angle used in , deg
+        thetaN = 20; % Nozzle parabola initial angle, deg
 
         % Results, see Comments in the class header
-        gasProps struct % Combustion gas state from CEA
+        gasPropsByRegion struct % Combustion gas state from CEA
         perf struct % Performance
         geom struct % Geometry and contour
         coolant struct % Coolant state at the channel inlet
@@ -254,13 +265,13 @@ classdef RocketEngine
         % has more than one element, and solves it unless told not to
         %                                        obj, array of RocketEngine
         % -----------------------------------------------------------------
-        % Arguments (all optional, called as RocketEngine(pc = ..., ...))
+        % Arguments (all optional, called as RocketEngine(p_c = ..., ...))
         %   fuel, oxidizer = Propellant config names (string) or Propellant
         %       objects
         %   material = Material config name (string) or Material object
         %   alt = altitude (m), T_amb = ambient temperature (K),
-        %   p_amb = ambient pressure (Pa), empty to compute from alt
-        %   pc, MR, mdot, d_channel, num_channels,
+        %   p_a = ambient pressure (Pa), empty to compute from alt
+        %   p_c, MR, mdot, d_channel, num_channels,
         %   T_coolant_i, t_wall, CR, Lstar = see properties.
         %       (expansion_ratio is not an input, solve computes it)
         %       T_coolant_i empty -> T_amb.
@@ -289,8 +300,8 @@ classdef RocketEngine
             end
 
             % Inputs that default to something that depends on other inputs
-            if isnan(args.p_amb)
-                args.p_amb = RocketEngine.GetAmbientPressure(alt = args.alt);
+            if isnan(args.p_a)
+                args.p_a = RocketEngine.GetAmbientPressure(alt = args.alt);
             end
 
             % Sweep: every input in sweepNames with more than one element
@@ -325,10 +336,12 @@ classdef RocketEngine
                 obj(i).name = args.name;
                 obj(i).alt = args.alt;
                 obj(i).T_amb = args.T_amb;
-                obj(i).p_amb = args.p_amb;
+                obj(i).p_a = args.p_a;
                 obj(i).material = material;
                 obj(i).fuel = fuel;
                 obj(i).oxidizer = oxidizer;
+                % Variables in sweepNames may be changed in the future,
+                % this next for loop adapts to that
                 for j = 1:numel(sweepNames)
                     gridIndex = find(sweepIndices == j);
                     if isempty(gridIndex)
@@ -360,7 +373,6 @@ classdef RocketEngine
         function objs = solve(objs)
         % Runs the whole analysis for every engine in the array, all at
         % once
-        %                                   objs, array of RocketEngine
             inputs = RocketEngine.organizeInputs(objs);
 
             % From assumption that only one unique fuel, oxidizer, and
@@ -373,34 +385,62 @@ classdef RocketEngine
             %% Combustion gas
             % Also finds the expansion ratio (added to inputs) and the gas
             % state at every contour station
-            [gasProps, gasLine, inputs] = RocketEngine.runCEA(inputs, fuel, oxidizer);
+            [gasPropsByRegion, gasPropsByStation, inputs] = RocketEngine.runCEA(inputs, fuel, oxidizer);
 
-            %% Performance and sizing
-            ge = gasProps.gamma_e;
-            perf.pe = gasProps.pe;
-            perf.Cf = sqrt(2 .* ge.^2 ./ (ge - 1) .* (2 ./ (ge + 1)).^((ge + 1) ./ (ge - 1)) .* (1 - (gasProps.pe ./ inputs.pc).^((ge - 1) ./ ge))) + inputs.expansion_ratio .* ((gasProps.pe - inputs.p_amb) ./ inputs.pc);
-            perf.flow_sonic = sqrt(gasProps.gamma_t .* RocketEngine.R_universal ./ gasProps.MW_t .* gasProps.T_t);
-            perf.At = inputs.mdot ./ perf.flow_sonic ./ gasProps.rho_t;
-            perf.dt = sqrt(perf.At .* 4 ./ pi);
-            perf.Ae = perf.At .* inputs.expansion_ratio;
-            perf.de = sqrt(perf.Ae .* 4 ./ pi);
-            perf.Vc = perf.At .* inputs.Lstar;
-            perf.thrust = perf.Cf .* perf.At .* inputs.pc;
-            perf.prop_cost_rate = inputs.mdot .* (oxidizer.cost .* inputs.MR ./ (1 + inputs.MR) + fuel.cost ./ (1 + inputs.MR));
-            perf.Isp = perf.thrust ./ inputs.mdot ./ RocketEngine.g0;
-            perf.cstar = perf.Isp .* RocketEngine.g0 ./ perf.Cf;
-            perf.eta_cstar = perf.cstar ./ gasProps.cstar_theo;
+            %% Performance and sizinginputs.expansion_ratio
+            gammay_e = gasPropsByRegion.gammay_e;
+            p_e = gasPropsByRegion.p_e;
+            perf.p_e = p_e;
+            gammar_e = (2 ./ (gammay_e + 1)).^((gammay_e + 1) ./ (2 .* (gammay_e - 1))) .* sqrt(gammay_e);
+            p_c = inputs.p_c;
+            expansion_ratio = inputs.expansion_ratio;
+            p_a = inputs.p_a;
+            cF = sqrt(2 .* gammay_e ./ (gammay_e - 1)) .* gammar_e .* sqrt(1 - (p_e ./ p_c).^((gammay_e - 1) ./ gammay_e)) .* (1 + ((gammay_e - 1) ./ 2 ./ gammay_e .* (p_e ./ p_c).^(-1 ./ gammay_e) .* (p_e ./ p_c - p_a ./ p_c)) ./ (1 - (p_e ./ p_c).^((gammay_e - 1) ./ gammay_e)));
+            perf.cF = cF;
+            gammay_t = gasPropsByRegion.gammay_t;
+            R_universal = RocketEngine.R_universal;
+            MW_t = gasPropsByRegion.MW_t;
+            T_t = gasPropsByRegion.T_t;
+            a_t = sqrt(gammay_t .* R_universal ./ MW_t .* T_t);
+            perf.a_t = a_t;
+            mdot = inputs.mdot;
+            rho_t = gasPropsByRegion.rho_t;
+            A_t = mdot ./ a_t ./ rho_t;
+            perf.A_t = A_t;
+            d_t = sqrt(A_t .* 4 ./ pi);
+            perf.d_t = d_t;
+            A_e = A_t .* expansion_ratio;
+            perf.A_e = A_e;
+            d_e = sqrt(A_e .* 4 ./ pi);
+            perf.d_e = d_e;
+            V_c = A_t .* inputs.Lstar;
+            perf.V_c = V_c;
+            thrust = cF .* A_t .* p_c;
+            perf.thrust = thrust;
+            MR = inputs.MR;
+            perf.prop_cost_rate = mdot .* (oxidizer.cost .* MR ./ (1 + MR) + fuel.cost ./ (1 + MR));
+            g0 = RocketEngine.g0;
+            Isp = thrust ./ mdot ./ g0;
+            perf.Isp = Isp;
+            c = Isp .* g0;
+            perf.c = c;
+            cstar = c ./ cF;
+            perf.cstar = cstar;
+            cstar_theo = gasPropsByRegion.cstar_theo;
+            perf.cstar_theo = cstar_theo;
+            perf.eta_cstar = cstar ./ cstar_theo;
 
             %% Contour
-            geom = RocketEngine.buildContour(inputs, perf.dt, perf.Vc);
-            geom.vol_engine = RocketEngine.getShellVolume(geom, inputs);
-            perf.TWR = perf.thrust ./ (RocketEngine.g0 .* material.rho .* geom.vol_engine);
+            geom = RocketEngine.buildContour(inputs, d_t, V_c);
+            V_engine = RocketEngine.getShellVolume(geom, inputs);
+            geom.V_engine = V_engine;
+            perf.TWR = thrust ./ (g0 .* material.rho .* V_engine);
 
             %% Coolant at the channel inlet
             coolant = RocketEngine.getCoolantInlet(inputs, fuel);
 
             %% Throat estimate (lumped, Dittus-Boelter on both sides)
-            wall = RocketEngine.getThroatEstimate(inputs, material, gasProps, perf, coolant);
+            wall = RocketEngine.getThroatEstimate(inputs, material, gasPropsByRegion, perf, coolant);
             % Crude worst case coolant temperature rise: throat heat flux
             % at every cross section of the whole channel
             % (kept as it was in regenEngineTradesCalculator.m)
@@ -411,12 +451,12 @@ classdef RocketEngine
             wall.P_coolant_min = fuel.getPvap(wall.T_coolant_f) ./ inputs.DF_p_coolant;
 
             %% Station-wise wall temperatures and heat flux
-            stations = RocketEngine.solveWallTemperatures(inputs, material, gasProps, perf, geom, gasLine, coolant);
+            stations = RocketEngine.solveWallTemperatures(inputs, material, gasPropsByRegion, perf, geom, gasPropsByStation, coolant);
             wall = RocketEngine.mergeStructs(wall, stations);
 
             %% Stress and design limits
-            wall.hoop_stress_doghouse = inputs.pc .* geom.Rc ./ inputs.t_wall;
-            wall.hoop_stress_fins = inputs.pc .* (geom.Rc + inputs.t_wall) ./ inputs.d_channel;
+            wall.hoop_stress_doghouse = p_c .* geom.R_c ./ inputs.t_wall;
+            wall.hoop_stress_fins = p_c .* (geom.R_c + inputs.t_wall) ./ inputs.d_channel;
             wall.therm_stress = material.E .* material.CTE .* (wall.T_wg - wall.T_wl);
             wall.total_stress_doghouse = wall.therm_stress + wall.hoop_stress_doghouse;
             wall.total_stress_fins = wall.therm_stress + wall.hoop_stress_fins;
@@ -427,11 +467,11 @@ classdef RocketEngine
             wall.T_wall_allowable = (material.T_melt - 273.15) ./ inputs.DF_temp + 273.15;
 
             %% Store results in the engines
-            gasLineFields = struct("M", gasLine.M, "T_gas", gasLine.T);
+            gasLineFields = struct("M", gasPropsByStation.M, "T_gas", gasPropsByStation.T);
             geom = RocketEngine.mergeStructs(geom, gasLineFields);
             for i = 1:numEngines
-                objs(i).expansion_ratio = inputs.expansion_ratio(i);
-                objs(i).gasProps = RocketEngine.getRow(gasProps, i);
+                objs(i).expansion_ratio = expansion_ratio(i);
+                objs(i).gasPropsByRegion = RocketEngine.getRow(gasPropsByRegion, i);
                 objs(i).perf = RocketEngine.getRow(perf, i);
                 objs(i).geom = RocketEngine.getRow(geom, i);
                 objs(i).coolant = RocketEngine.getRow(coolant, i);
@@ -450,7 +490,7 @@ classdef RocketEngine
         % -----------------------------------------------------------------
         % Arguments
         %   resultPath = name of the property, or of the result struct
-        %       followed by a dot and a field, e.g. "pc" or "perf.thrust" or
+        %       followed by a dot and a field, e.g. "p_c" or "perf.thrust" or
         %       "wall.T_wg"
         % -----------------------------------------------------------------
             arguments
@@ -494,7 +534,7 @@ classdef RocketEngine
             Propellant.printValidNames();
         end
 
-        function p_amb = GetAmbientPressure(args)
+        function p_a = GetAmbientPressure(args)
         % Gets ambient pressure at altitude
         % -----------------------------------------------------------------
         % Arguments
@@ -510,7 +550,7 @@ classdef RocketEngine
             RocketEngine.requireArgs(args, "alt");
             alt = args.alt;
 
-            p_amb = RocketEngine.p_SL .* (1 + (RocketEngine.lapse_rate .* alt) ./ RocketEngine.T_SL).^(-RocketEngine.g0 .* RocketEngine.MW_air ./ (RocketEngine.R_universal .* RocketEngine.lapse_rate));
+            p_a = RocketEngine.p_SL .* (1 + (RocketEngine.lapse_rate .* alt) ./ RocketEngine.T_SL).^(-RocketEngine.g0 .* RocketEngine.MW_air ./ (RocketEngine.R_universal .* RocketEngine.lapse_rate));
         end
 
         function sigma = GetBartzCorrectionFactor(args)
@@ -879,7 +919,7 @@ classdef RocketEngine
         % -----------------------------------------------------------------
         % Arguments
         %   area_ratio = A / A_throat, any size
-        %   gamma = specific heat ratio, same size as area_ratio, or scalar
+        %   gammay = specific heat ratio, same size as area_ratio, or scalar
         %   subsonic = true where the subsonic root is wanted, false where the
         %       supersonic one is, same size as area_ratio, or scalar
         % -----------------------------------------------------------------
@@ -890,12 +930,12 @@ classdef RocketEngine
         % -----------------------------------------------------------------
             arguments
                 args.area_ratio = [];
-                args.gamma = [];
+                args.gammay = [];
                 args.subsonic = [];
             end
-            RocketEngine.requireArgs(args, ["area_ratio", "gamma", "subsonic"]);
+            RocketEngine.requireArgs(args, ["area_ratio", "gammay", "subsonic"]);
             areaRatio = args.area_ratio;
-            gammay = args.gamma .* ones(size(areaRatio));
+            gammay = args.gammay .* ones(size(areaRatio));
             subsonic = args.subsonic & true(size(areaRatio));
 
             M = ones(size(areaRatio));
@@ -928,14 +968,14 @@ classdef RocketEngine
 
         function cases = parseCEAOutput(outputText)
         % Reads the text from RocketCEA's get_full_cea_output (short output)
-        % into a struct array, one element per case (a pc, O/F pair)
+        % into a struct array, one element per case (a p_c, O/F pair)
         %                                  cases(i).eq, equilibrium page
         %                                  cases(i).fr, frozen page (empty if
         %                                  the call wasn't frozen)
         % -----------------------------------------------------------------
         % Each page is a struct of row vectors with one value per column of
         % the page (injector, chamber end, throat, then the other points, in
-        % CEA's units): PinjOvP, P, T, rho, MW, gamma, mach, mu, cpThermo,
+        % CEA's units): PinjOvP, P, T, rho, MW, gammay, mach, mu, cpThermo,
         % cpEq, kEq, PrEq, cpFr, kFr, PrFr, and AeAt, cstar, CF, Ivac, Isp
         % (CEA doesn't print these for the injector, so their first value is
         % NaN), and OF, Pinj. Rows a page doesn't have are left out.
@@ -980,8 +1020,8 @@ classdef RocketEngine
                     args.material (1, 1) Material = Material("AlSi10Mg")
                     args.alt (1, 1) double = 342
                     args.T_amb (1, 1) double = 273.15 + 20
-                    args.p_amb (1, 1) double = NaN
-                    args.pc double = 128 * 6894.76
+                    args.p_a (1, 1) double = NaN
+                    args.p_c double = 128 * 6894.76
                     args.MR double = 1.6
                     args.mdot double = 1.2 * .45359237
                     args.d_channel double = 1.2E-3
@@ -990,7 +1030,7 @@ classdef RocketEngine
                     args.t_wall double = .8E-3
                     args.CR double = 6
                     args.Lstar double = .6
-                    args.thetaN (1, 1) double = 20
+                    args.thetaN (1, 1) double = 20 % deg
                     args.fpct (1, 1) double = 1
                     args.etaRc (1, 1) double = .2
                     args.DF_stress (1, 1) double = 2
@@ -1026,16 +1066,19 @@ classdef RocketEngine
         %}
 
         function inputs = organizeInputs(objs)
-        % Collects every engine's design inputs into column vectors
+        % Collects every engine's design inputs into column vectors.
+        % Returns a struct "inputs" where each field is a column vector of
+        % the values of a certain property of every individual RocketEngine
+        % obj in objs
             objs = objs(:);
             fuelNames = arrayfun(@(e) char(e.fuel.name), objs, UniformOutput = false);
             oxidizerNames = arrayfun(@(e) char(e.oxidizer.name), objs, UniformOutput = false);
             materialNames = arrayfun(@(e) char(e.material.name), objs, UniformOutput = false);
             if numel(unique(fuelNames)) > 1 || numel(unique(oxidizerNames)) > 1 || numel(unique(materialNames)) > 1
-                error("All engines solved together must have the same fuel, oxidizer and material");
+                error("All engines solved together must have the same fuel, oxidizer, and material");
             end
 
-            inputNames = ["alt", "T_amb", "p_amb", "pc", "MR", ...
+            inputNames = ["alt", "T_amb", "p_a", "p_c", "MR", ...
                 "mdot", "d_channel", "num_channels", "T_coolant_i", "t_wall", "CR", "Lstar", "thetaN", "fpct", "etaRc", ...
                 "DF_stress", "DF_temp", "DF_p_coolant"];
             for inputName = inputNames
@@ -1043,25 +1086,25 @@ classdef RocketEngine
             end
         end
 
-        function [gasProps, gasLine, inputs] = runCEA(inputs, fuel, oxidizer)
+        function [gasPropsByRegion, gasPropsByStation, inputs] = runCEA(inputs, fuel, oxidizer)
         % Gets combustion gas state from CEA for every engine, in three
-        % stages, calling CEA only for each unique (pc, MR, CR, p_amb,
+        % stages, calling CEA only for each unique (p_c, MR, CR, p_a,
         % thetaN, fpct, etaRc):
-        %   1) Small calls with the pressure ratio pc / p_amb, which return
+        %   1) Small calls with the pressure ratio p_c / p_a, which return
         %       the expansion ratio for exit pressure = ambient pressure
         %   2) Area ratio of every contour station, from a unit throat
         %       contour (area ratio doesn't depend on the throat size, so
         %       no resizing is needed after the throat is sized)
         %   3) Full calls at those area ratios, split into several calls
         %       each (see numStations)
-        %                  gasProps, one value per engine
-        %                  gasLine, N x S arrays of state at every station
+        %                  gasPropsByRegion, one value per engine
+        %                  gasPropsByStation, N x S arrays of state at every station
         %                  inputs, the same with expansion_ratio added
         % -----------------------------------------------------------------
         % Assumptions
         %   1) CEA's inputs and outputs are English units, converted here
         %   2) See Assumptions 10 and 11 of the class header. The frozen
-        %       exit gamma replaces the equilibrium one of the earlier
+        %       exit gammay replaces the equilibrium one of the earlier
         %       version in the thrust coefficient.
         %   3) CEA's tables are matched to stations by area ratio, the
         %       nearest one (stations closer than tol_arSchedule to one
@@ -1070,11 +1113,11 @@ classdef RocketEngine
             % Import RocketCEA library
             py.importlib.import_module("rocketcea");
 
-            numEngines = numel(inputs.pc);
+            numEngines = numel(inputs.p_c);
             psiPerPa = 0.000145038;
             atmToPa = 101325;
 
-            CEAkeys = [inputs.pc, inputs.MR, inputs.CR, inputs.p_amb, ...
+            CEAkeys = [inputs.p_c, inputs.MR, inputs.CR, inputs.p_a, ...
                 inputs.thetaN, inputs.fpct, inputs.etaRc];
             [uniqueCEAKeys, firstIdx, mapToUnique] = unique(CEAkeys, "rows", "first");
             numUnique = size(uniqueCEAKeys, 1);
@@ -1087,25 +1130,25 @@ classdef RocketEngine
             end
 
             %% Stage 1: expansion ratio of each case
-            % One call per (pc, CR, p_amb), with all of its MR's in a list
+            % One call per (p_c, CR, p_a), with all of its MR's in a list
             epsUnique = nan(numUnique, 1);
             [uniqueGroups, ~, groupOf] = unique(uniqueCEAKeys(:, [1 3 4]), "rows");
             for g = 1:size(uniqueGroups, 1)
                 members = find(groupOf == g);
-                pc = uniqueGroups(g, 1);
+                p_c = uniqueGroups(g, 1);
                 CR = uniqueGroups(g, 2);
-                p_amb = uniqueGroups(g, 3);
+                p_a = uniqueGroups(g, 3);
                 MRs = uniqueCEAKeys(members, 2);
-                cases = RocketEngine.callCEA(ceaByCR(CR), pc * psiPerPa, MRs, [], [], pc / p_amb, 1, 0);
+                cases = RocketEngine.callCEA(ceaByCR(CR), p_c * psiPerPa, MRs, [], [], p_c / p_a, 1, 0);
                 if numel(cases) ~= numel(members)
-                    error("CEA returned %d cases for %d O/F's (pc = %g Pa, CR = %g)", numel(cases), numel(members), pc, CR);
+                    error("CEA returned %d cases for %d O/F's (pc = %g Pa, CR = %g)", numel(cases), numel(members), p_c, CR);
                 end
                 for m = 1:numel(members)
                     frozenBlock = cases(m).fr;
                     if abs(cases(m).eq.OF - MRs(m)) > 1E-4 .* MRs(m) || isempty(frozenBlock) || numel(frozenBlock.T) ~= 4
-                        error("CEA's expansion ratio call for pc = %g Pa, O/F = %g, p_amb = %g Pa wasn't as expected. Is p_amb above the chamber end pressure?", pc, MRs(m), p_amb);
+                        error("CEA's expansion ratio call for p_c = %g Pa, MR = %g, p_a = %g Pa wasn't as expected. Is p_a above the chamber end pressure?", p_c, MRs(m), p_a);
                     end
-                    % The last column is the exit, at pc / p_amb
+                    % The last column is the exit, at p_c / p_a
                     epsUnique(members(m)) = frozenBlock.AeAt(end);
                 end
             end
@@ -1124,10 +1167,10 @@ classdef RocketEngine
             else
                 subsonicTransport = "eq";
             end
-            gasPropFields = ["MW_t", "gamma_t", "gamma_e", "gamma_c", "pe", ...
+            gasPropFields = ["MW_t", "gammay_t", "gammay_e", "gammay_c", "p_e", ...
                 "Isp_theo", "T_c", "T_t", "T_e", "rho_t", "cp_t", "mu_t", ...
                 "k_t", "Pr_t", "cp_c", "mu_c", "k_c", "Pr_c", "cstar_theo"];
-            stateFields = ["M", "T", "P", "gamma", "mu", "k", "Pr", "cp", "rho"];
+            stateFields = ["M", "T", "P", "gammay", "mu", "k", "Pr", "cp", "rho"];
             gasPropsUnique = struct();
             for fieldName = gasPropFields
                 gasPropsUnique.(fieldName) = zeros(numUnique, 1);
@@ -1138,7 +1181,7 @@ classdef RocketEngine
             end
 
             for u = 1:numUnique
-                pc = uniqueCEAKeys(u, 1);
+                p_c = uniqueCEAKeys(u, 1);
                 MR = uniqueCEAKeys(u, 2);
                 CR = uniqueCEAKeys(u, 3);
                 cea = ceaByCR(CR);
@@ -1158,9 +1201,9 @@ classdef RocketEngine
                 supStates = [];
                 supChunks = RocketEngine.splitIntoChunks(supList, RocketEngine.maxSuparPerCall);
                 for c = 1:numel(supChunks)
-                    cases = RocketEngine.callCEA(cea, pc * psiPerPa, MR, supChunks{c}, [], [], 1, 1);
+                    cases = RocketEngine.callCEA(cea, p_c * psiPerPa, MR, supChunks{c}, [], [], 1, 1);
                     if numel(cases) ~= 1 || isempty(cases(1).fr)
-                        error("CEA didn't return one frozen case for pc = %g Pa, O/F = %g. CEA drops the frozen results when a call has too many points, see numStations.", pc, MR);
+                        error("CEA didn't return one frozen case for p_c = %g Pa, MR = %g. CEA drops the frozen results when a call has too many points, see numStations.", p_c, MR);
                     end
                     frozenBlock = cases(1).fr;
                     cols = RocketEngine.matchColumns(frozenBlock, 4, supChunks{c});
@@ -1177,9 +1220,9 @@ classdef RocketEngine
                 subStates = [];
                 subChunks = RocketEngine.splitIntoChunks(subList, RocketEngine.maxSubarPerCall);
                 for c = 1:numel(subChunks)
-                    cases = RocketEngine.callCEA(cea, pc * psiPerPa, MR, [], subChunks{c}, [], 0, 1);
+                    cases = RocketEngine.callCEA(cea, p_c * psiPerPa, MR, [], subChunks{c}, [], 0, 1);
                     if numel(cases) ~= 1
-                        error("CEA returned %d cases for the subsonic area ratios at pc = %g Pa, O/F = %g", numel(cases), pc, MR);
+                        error("CEA returned %d cases for the subsonic area ratios at p_c = %g Pa, MR = %g", numel(cases), p_c, MR);
                     end
                     cols = RocketEngine.matchColumns(cases(1).eq, 4, subChunks{c});
                     subStates = RocketEngine.catStates(subStates, RocketEngine.getCEAState(cases(1).eq, cols, subsonicTransport, atmToPa));
@@ -1204,10 +1247,10 @@ classdef RocketEngine
 
                 % Single values
                 gasPropsUnique.MW_t(u) = throatState.MW;
-                gasPropsUnique.gamma_t(u) = throatState.gamma;
-                gasPropsUnique.gamma_e(u) = supStates.gamma(end);
-                gasPropsUnique.gamma_c(u) = chamberState.gamma;
-                gasPropsUnique.pe(u) = supStates.P(end);
+                gasPropsUnique.gammay_t(u) = throatState.gammay;
+                gasPropsUnique.gammay_e(u) = supStates.gammay(end);
+                gasPropsUnique.gammay_c(u) = chamberState.gammay;
+                gasPropsUnique.p_e(u) = supStates.P(end);
                 gasPropsUnique.Isp_theo(u) = supStates.Ivac(end);
                 gasPropsUnique.T_c(u) = chamberState.T;
                 gasPropsUnique.T_t(u) = throatState.T;
@@ -1226,13 +1269,13 @@ classdef RocketEngine
 
             % Spread back out to one value per engine
             for fieldName = gasPropFields
-                gasProps.(fieldName) = gasPropsUnique.(fieldName)(mapToUnique);
+                gasPropsByRegion.(fieldName) = gasPropsUnique.(fieldName)(mapToUnique);
             end
             for fieldName = stateFields
-                gasLine.(fieldName) = gasLineUnique.(fieldName)(mapToUnique, :);
+                gasPropsByStation.(fieldName) = gasLineUnique.(fieldName)(mapToUnique, :);
             end
-            gasLine.AR = areaRatio;
-            gasLine.subsonic = (1:numStationsTotal) > unitGeom.iThroat;
+            gasPropsByStation.AR = areaRatio;
+            gasPropsByStation.subsonic = (1:numStationsTotal) > unitGeom.iThroat;
         end
 
         function cases = callCEA(cea, pcPsi, MR, supar, subar, PcOvPe, frozen, showTransport)
@@ -1342,7 +1385,7 @@ classdef RocketEngine
             state.rho = block.rho(cols)' .* 1000;
             % g/mol to kg/mol
             state.MW = block.MW(cols)' .* 1E-3;
-            state.gamma = block.gamma(cols)';
+            state.gammay = block.gammay(cols)';
             % millipoise to Pa-s
             state.mu = block.mu(cols)' .* 1E-4;
             % cal/g-K to J/kg-K
@@ -1358,7 +1401,7 @@ classdef RocketEngine
         % Reads one page of CEA's output, see parseCEAOutput
             page = struct();
             page.isEquilibrium = contains(pageLines{1}, "ASSUMING EQUILIBRIUM");
-            rowKeys = ["PinjOvP", "P", "T", "rho", "Mn", "MW", "gamma", "mach", "mu", ...
+            rowKeys = ["PinjOvP", "P", "T", "rho", "Mn", "MW", "gammay", "mach", "mu", ...
                 "cp", "k", "Pr", "AeAt", "cstar", "CF", "Ivac", "Isp"];
             rowLabels = ["Pinj/P", "P, ATM", "T, K", "RHO, G/CC", "M, (1/n)", "MW, MOL WT", ...
                 "GAMMAs", "MACH NUMBER", "VISC,MILLIPOISE", "Cp, CAL/(G)(K)", ...
@@ -1445,7 +1488,7 @@ classdef RocketEngine
             end
         end
 
-        function geom = buildContour(in, dt, Vc)
+        function geom = buildContour(inputs, d_t, V_c)
         % Builds the nozzle and chamber contour of every engine at once
         %   r, z: N x S arrays, N engines, S stations from nozzle exit to
         %   injector
@@ -1454,16 +1497,16 @@ classdef RocketEngine
         %   See Assumption 5 of the class header. Also:
         %   1) The nozzle's circular arc has radius .382 times the throat
         %       radius, the converging arc 1.5 times
-        %   2) Chamber volume Vc is split into the converging sections and
+        %   2) Chamber volume V_c is split into the converging sections and
         %       the straight section, by volume of revolution
         % -----------------------------------------------------------------
         % Sources
         %   1) Rao approximation bell nozzle, GT slides:
         %       https://www.seitzman.gatech.edu/classes/ae6450/nozzle_geometries.pdf
         % -----------------------------------------------------------------
-            n = RocketEngine.numStations;
-            Rt = dt ./ 2;
-            thetaN = in.thetaN ./ 180 .* pi;
+            numStations = RocketEngine.numStations;
+            R_t = d_t ./ 2;
+            thetaN = inputs.thetaN ./ 180 .* pi; % deg to rad
 
             % Sections are built about (0, 0) and shifted into place, from the
             % throat outward both ways. Order from nozzle exit to injector:
@@ -1471,34 +1514,42 @@ classdef RocketEngine
             % parabolic, chamber linear.
 
             %% Nozzle circular
-            R1 = .382 .* Rt;
+            R1 = 0.382 .* R_t; % From assumptions
             xN = R1 .* sin(thetaN);
             L_nozzle_circular = xN;
-            z_nozzle_circular = linspace(0, 1, n.nozzleCircular) .* L_nozzle_circular;
-            r_nozzle_circular = (Rt + R1) - sqrt(R1.^2 - z_nozzle_circular.^2);
+            z_nozzle_circular = linspace(0, 1, numStations.nozzleCircular) .* L_nozzle_circular;
+            r_nozzle_circular = (R_t + R1) - sqrt(R1.^2 - z_nozzle_circular.^2);
             % Flip so it runs from the parabolic section to the throat
             r_nozzle_circular = flip(r_nozzle_circular, 2);
-            L_nozzle = in.fpct .* Rt ./ tan(thetaN) .* (sqrt(in.expansion_ratio) - 1 + 1.5 .* (1 ./ cos(thetaN) - 1));
+            L_nozzle = inputs.fpct .* R_t ./ tan(thetaN) .* (sqrt(inputs.expansion_ratio) - 1 + 1.5 .* (1 ./ cos(thetaN) - 1));
             z_nozzle_circular = z_nozzle_circular + L_nozzle - L_nozzle_circular;
 
             %% Chamber circular
-            R1p = Rt .* 1.5;
-            Rc = sqrt(in.CR) .* Rt;
-            % How far between throat radius and chamber radius the arc ends
-            arcFraction = in.etaRc .* (Rc - Rt) ./ R1p;
-            if any(arcFraction > 2)
-                error("Converging arc is geometrically impossible for these CR and etaRc inputs, lower etaRc");
+            % R1p is meant to be like a "R1" prime, the radius for the
+            % circular part of the engine wall on the chamber side of the throat instead
+            % of the nozzle side
+            R1p = R_t .* 1.5; % From assumptions
+            CR = inputs.CR;
+            R_c = sqrt(CR) .* R_t;
+            etaRcMax = min(1, R1p ./ (R_c - R_t));
+            etaRc = inputs.etaRc;
+            maskBadetaRc = etaRc <= 0 | etaRc >= etaRcMax;
+            if any(maskBadetaRc)
+                idxFirstBadetaRc = find(maskBadetaRc, 1);
+                error("etaRc %.3g must be between 0 and %.3g for engine %d (CR = %.3g)", etaRc(idxFirstBadetaRc), ...
+                    etaRcMax(idxFirstBadetaRc), idxFirstBadetaRc, CR(idxFirstBadetaRc));
             end
+            arcFraction = etaRc .* (R_c - R_t) ./ R1p;
             alpha = acos(1 - arcFraction);
             L_chamber_circular = R1p .* sin(alpha);
-            z_chamber_circular = linspace(0, 1, n.chamberCircular) .* L_chamber_circular;
-            r_chamber_circular = (Rt + R1p) - sqrt(R1p.^2 - z_chamber_circular.^2);
+            z_chamber_circular = linspace(0, 1, numStations.chamberCircular) .* L_chamber_circular;
+            r_chamber_circular = (R_t + R1p) - sqrt(R1p.^2 - z_chamber_circular.^2);
             z_chamber_circular = z_chamber_circular + z_nozzle_circular(:, end);
 
             %% Nozzle parabolic
-            R_exit = sqrt(in.expansion_ratio) .* Rt;
+            R_exit = sqrt(inputs.expansion_ratio) .* R_t;
             L_nozzle_parabolic = L_nozzle - L_nozzle_circular;
-            z_nozzle_parabolic = linspace(0, 1, n.nozzleParabolic) .* L_nozzle_parabolic;
+            z_nozzle_parabolic = linspace(0, 1, numStations.nozzleParabolic) .* L_nozzle_parabolic;
             % Parabola r = sqrt(b * (z - h)) + k, solved by hand from the
             % angle thetaN at the circular section and exit radius
             k = R_exit.^2 ./ (2 .* tan(thetaN) .* L_nozzle_parabolic + 2 .* R_exit);
@@ -1514,32 +1565,32 @@ classdef RocketEngine
             % Parabola r = a * z^2 + b * z that starts at the end of the
             % converging arc at its angle alpha, and ends tangent to the
             % chamber wall
-            r1 = Rc - r_chamber_circular(:, end);
+            r1 = R_c - r_chamber_circular(:, end);
             b_p = tan(alpha);
             a_p = -b_p.^2 ./ (4 .* r1);
             L_chamber_parabolic = (-b_p + sqrt(max(b_p.^2 + 4 .* a_p .* r1, 0))) ./ (2 .* a_p);
-            z_chamber_parabolic = linspace(0, 1, n.chamberParabolic) .* L_chamber_parabolic;
+            z_chamber_parabolic = linspace(0, 1, numStations.chamberParabolic) .* L_chamber_parabolic;
             r_chamber_parabolic = a_p .* z_chamber_parabolic.^2 + b_p .* z_chamber_parabolic;
             z_chamber_parabolic = z_chamber_parabolic + z_chamber_circular(:, end);
             r_chamber_parabolic = r_chamber_parabolic + r_chamber_circular(:, end);
 
             %% Chamber linear
             % What's left of the chamber volume after the converging sections
-            Vcl = Vc - pi .* sum(r_chamber_circular(:, 1:end - 1).^2 .* diff(z_chamber_circular, 1, 2), 2);
+            Vcl = V_c - pi .* sum(r_chamber_circular(:, 1:end - 1).^2 .* diff(z_chamber_circular, 1, 2), 2);
             Vcl = Vcl - pi .* sum(r_chamber_parabolic(:, 1:end - 1).^2 .* diff(z_chamber_parabolic, 1, 2), 2);
-            L_chamber_linear = Vcl ./ (pi .* Rc.^2);
+            L_chamber_linear = Vcl ./ (pi .* R_c.^2);
             if any(L_chamber_linear < 0)
                 warning("Chamber volume is smaller than the converging sections' volume for some engines (L* too small, or CR too large); their straight chamber length is negative");
             end
-            r_chamber_linear = Rc .* ones(1, n.chamberLinear);
-            z_chamber_linear = linspace(0, 1, n.chamberLinear) .* L_chamber_linear + max(z_chamber_parabolic, [], 2);
+            r_chamber_linear = R_c .* ones(1, numStations.chamberLinear);
+            z_chamber_linear = linspace(0, 1, numStations.chamberLinear) .* L_chamber_linear + max(z_chamber_parabolic, [], 2);
 
             %% Compile all sections
             geom.r = [r_nozzle_parabolic, r_nozzle_circular, r_chamber_circular, r_chamber_parabolic, r_chamber_linear];
             geom.z = [z_nozzle_parabolic, z_nozzle_circular, z_chamber_circular, z_chamber_parabolic, z_chamber_linear];
             geom.R1 = R1;
             geom.R1p = R1p;
-            geom.Rc = Rc;
+            geom.R_c = R_c;
             geom.R_exit = R_exit;
             geom.thetaN = thetaN;
             geom.xN = xN;
@@ -1551,7 +1602,7 @@ classdef RocketEngine
             % Station index of the throat (the last station of the nozzle
             % circular section. The first station of the chamber circular
             % section is a duplicate of it, at the same z)
-            geom.iThroat = (n.nozzleParabolic + n.nozzleCircular) .* ones(size(Rt));
+            geom.iThroat = (numStations.nozzleParabolic + numStations.nozzleCircular) .* ones(size(R_t));
         end
 
         function vol = getShellVolume(geom, in)
@@ -1571,7 +1622,7 @@ classdef RocketEngine
             vol = sum((area(:, 1:end - 1) + area(:, 2:end)) ./ 2 .* diff(geom.z, 1, 2), 2);
         end
 
-        function gasLine = getGasAlongContour(geom, gasProps)
+        function gasPropsByStation = getGasAlongContour(geom, gasPropsByRegion)
         % NOT CALLED ANYMORE: runCEA gets the gas state at every station from
         % CEA itself. Kept as the ideal gas version, as a cross check.
         % Combustion gas Mach number, static temperature and transport
@@ -1580,17 +1631,17 @@ classdef RocketEngine
         % Assumptions
         %   See Assumption 4 of the class header. Also:
         %   1) Static temperature uses the throat gas temperature to find
-        %       the stagnation temperature, with the throat gamma, as the
-        %       earlier calculator did: T = T_t * (1 + (gamma_t - 1)/2) /
-        %       (1 + (gamma - 1)/2 * M^2), where gamma is the chamber's for
+        %       the stagnation temperature, with the throat gammay, as the
+        %       earlier calculator did: T = T_t * (1 + (gammay_t - 1)/2) /
+        %       (1 + (gammay - 1)/2 * M^2), where gammay is the chamber's for
         %       subsonic stations and the throat's for the rest
         %   2) The gas velocity formula in the earlier calculator was
         %       missing the molar weight, so no velocity is stored. Mass
         %       flux, which is all the heat transfer calc uses, is mdot/A.
         % -----------------------------------------------------------------
             [~, numStations] = size(geom.r);
-            Rt = geom.r(sub2ind(size(geom.r), (1:size(geom.r, 1))', geom.iThroat));
-            areaRatio = geom.r.^2 ./ Rt.^2;
+            R_t = geom.r(sub2ind(size(geom.r), (1:size(geom.r, 1))', geom.iThroat));
+            areaRatio = geom.r.^2 ./ R_t.^2;
 
             % The last station of the throat region, counted from the nozzle
             % exit, is where subsonic flow stops
@@ -1601,26 +1652,26 @@ classdef RocketEngine
             % Chamber values at subsonic stations, throat values everywhere
             % else
             full = ones(size(areaRatio));
-            gamma_c = gasProps.gamma_c .* full;
-            mu_c = gasProps.mu_c .* full;
-            k_c = gasProps.k_c .* full;
-            Pr_c = gasProps.Pr_c .* full;
-            gamma_station = gasProps.gamma_t .* full;
-            gamma_station(subsonic) = gamma_c(subsonic);
-            gasLine.mu = gasProps.mu_t .* full;
-            gasLine.mu(subsonic) = mu_c(subsonic);
-            gasLine.k = gasProps.k_t .* full;
-            gasLine.k(subsonic) = k_c(subsonic);
-            gasLine.Pr = gasProps.Pr_t .* full;
-            gasLine.Pr(subsonic) = Pr_c(subsonic);
+            gammay_c = gasPropsByRegion.gammay_c .* full;
+            mu_c = gasPropsByRegion.mu_c .* full;
+            k_c = gasPropsByRegion.k_c .* full;
+            Pr_c = gasPropsByRegion.Pr_c .* full;
+            gamma_station = gasPropsByRegion.gammay_t .* full;
+            gamma_station(subsonic) = gammay_c(subsonic);
+            gasPropsByStation.mu = gasPropsByRegion.mu_t .* full;
+            gasPropsByStation.mu(subsonic) = mu_c(subsonic);
+            gasPropsByStation.k = gasPropsByRegion.k_t .* full;
+            gasPropsByStation.k(subsonic) = k_c(subsonic);
+            gasPropsByStation.Pr = gasPropsByRegion.Pr_t .* full;
+            gasPropsByStation.Pr(subsonic) = Pr_c(subsonic);
 
-            gasLine.AR = areaRatio;
-            gasLine.subsonic = subsonic;
-            gasLine.M = RocketEngine.GetMachFromAreaRatio(area_ratio = areaRatio, gamma = gamma_station, subsonic = subsonic);
-            gasLine.T = gasProps.T_t .* (1 + (gasProps.gamma_t - 1) ./ 2) ./ (1 + (gamma_station - 1) ./ 2 .* gasLine.M.^2);
+            gasPropsByStation.AR = areaRatio;
+            gasPropsByStation.subsonic = subsonic;
+            gasPropsByStation.M = RocketEngine.GetMachFromAreaRatio(area_ratio = areaRatio, gammay = gamma_station, subsonic = subsonic);
+            gasPropsByStation.T = gasPropsByRegion.T_t .* (1 + (gasPropsByRegion.gammay_t - 1) ./ 2) ./ (1 + (gamma_station - 1) ./ 2 .* gasPropsByStation.M.^2);
         end
 
-        function coolant = getCoolantInlet(in, fuel)
+        function coolant = getCoolantInlet(inputs, fuel)
         % Coolant state and flow in a channel at the channel inlet
         % -----------------------------------------------------------------
         % Assumptions
@@ -1628,20 +1679,30 @@ classdef RocketEngine
         %   1) Channels are square, so area is d^2 and hydraulic diameter
         %       (4 * area / perimeter) is d
         % -----------------------------------------------------------------
-            coolant.A_channel = in.d_channel.^2;
-            coolant.dH = 4 .* coolant.A_channel ./ (4 .* in.d_channel);
+            d_channel = inputs.d_channel;
+            A_channel = d_channel.^2;
+            coolant.A_channel = A_channel;
+            dH = 4 .* A_channel ./ (4 .* d_channel);
+            coolant.dH = dH;
             % Only fuel in the channels
-            coolant.mdot_channel = in.mdot .* (1 ./ (1 + in.MR)) ./ in.num_channels;
-            coolant.rho = fuel.getRho(in.T_coolant_i);
-            coolant.k = fuel.getK(in.T_coolant_i, coolant.rho);
-            coolant.mu = fuel.getMu(in.T_coolant_i, coolant.rho);
-            coolant.cp = fuel.getCp(in.T_coolant_i);
-            coolant.vel = coolant.mdot_channel ./ coolant.A_channel ./ coolant.rho;
-            coolant.Re = coolant.dH .* coolant.vel .* coolant.rho ./ coolant.mu;
-            coolant.Pr = coolant.cp .* coolant.mu ./ coolant.k;
+            mdot_channel = inputs.mdot .* (1 ./ (1 + inputs.MR)) ./ inputs.num_channels;
+            coolant.mdot_channel = mdot_channel;
+            T_coolant_i = inputs.T_coolant_i;
+            rho = fuel.getRho(T_coolant_i);
+            coolant.rho = rho;
+            k = fuel.getK(T_coolant_i, rho);
+            coolant.k = k;
+            mu = fuel.getMu(T_coolant_i, rho);
+            coolant.mu = mu;
+            cp = fuel.getCp(T_coolant_i);
+            coolant.cp = cp;
+            vel = mdot_channel ./ A_channel ./ rho;
+            coolant.vel = vel;
+            coolant.Re = dH .* vel .* rho ./ mu;
+            coolant.Pr = cp .* mu ./ k;
         end
 
-        function wall = getThroatEstimate(in, material, gasProps, perf, coolant)
+        function wall = getThroatEstimate(inputs, material, gasPropsByRegion, perf, coolant)
         % Quick lumped estimate of heat flux and wall temperatures at the
         % throat. Cheaper than the station-wise solution
         % -----------------------------------------------------------------
@@ -1656,36 +1717,46 @@ classdef RocketEngine
         %   1) https://www.sciencedirect.com/topics/engineering/dittus-boelter-correlation
         %   2) Equations 8-21 and 8-24 in Rocket Propulsion Elements by Sutton
         % -----------------------------------------------------------------
-            Nu_coolant = .023 .* coolant.Re.^.8 .* coolant.Pr.^.4;
-            h_l = Nu_coolant .* coolant.k ./ coolant.dH;
-            laminar = coolant.Re <= RocketEngine.Re_D_transition;
-            h_l_laminar = .023 .* coolant.cp .* coolant.mdot_channel ./ coolant.A_channel .* coolant.Re.^-.2 .* (coolant.mu .* coolant.cp ./ coolant.k).^(-2 ./ 3);
-            h_l(laminar) = h_l_laminar(laminar);
+            Re = coolant.Re;
+            Nu_coolant = 0.023 .* Re.^0.8 .* coolant.Pr.^0.4;
+            k = coolant.k;
+            h_l = Nu_coolant .* k ./ coolant.dH;
+            maskLaminar = Re <= RocketEngine.Re_D_transition;
+            cp = coolant.cp;
+            h_l_laminar = 0.023 .* cp .* coolant.mdot_channel ./ coolant.A_channel .* Re.^-0.2 .* (coolant.mu .* cp ./ k).^(-2 ./ 3);
+            h_l(maskLaminar) = h_l_laminar(maskLaminar);
 
-            h_g = .023 .* (gasProps.rho_t .* perf.flow_sonic).^.8 ./ perf.dt.^.2 .* gasProps.Pr_t.^.4 .* gasProps.k_t ./ gasProps.mu_t.^.8;
+            d_t = perf.d_t;
+            h_g = 0.023 .* (gasPropsByRegion.rho_t .* perf.a_t).^0.8 ./ d_t.^0.2 .* gasPropsByRegion.Pr_t.^0.4 .* gasPropsByRegion.k_t ./ gasPropsByRegion.mu_t.^0.8;
 
             % Initial T_wg_avg guess
-            T_wg_avg_guess = 0.5 * (gasProps.T_t + in.T_coolant_i);
+            T_t = gasPropsByRegion.T_t;
+            T_coolant_i = inputs.T_coolant_i;
+            T_wg_avg_guess = 0.5 * (T_t + T_coolant_i);
             % Need k to get T_wg_throat, but need T_wg_throat to get k, so
             % iterate with T_wg_avg_guess until that temperature predicts
+            t_wall = inputs.t_wall;
             for i = 1:RocketEngine.maxIter_T_wg
                 k_wall = material.getK(T_wg_avg_guess);
-                TR_lumped = 1 ./ h_g + in.t_wall ./ k_wall + 1 ./ h_l ./ ((perf.dt + in.t_wall) ./ perf.dt);
-                wall.q_throat = (gasProps.T_t - in.T_coolant_i) ./ TR_lumped;
-                wall.T_wg_throat = gasProps.T_t - wall.q_throat ./ h_g;
-                wall.T_wl_throat = in.T_coolant_i + wall.q_throat ./ h_l;
-                if abs(T_wg_avg_guess - 0.5 * (wall.T_wg_throat + wall.T_wl_throat)) <= RocketEngine.tol_T_wg
+                TR_lumped = 1 ./ h_g + t_wall ./ k_wall + 1 ./ h_l ./ ((d_t + t_wall) ./ d_t);
+                q_throat = (T_t - T_coolant_i) ./ TR_lumped;
+                T_wg_throat = T_t - q_throat ./ h_g;
+                T_wl_throat = T_coolant_i + q_throat ./ h_l;
+                if abs(T_wg_avg_guess - 0.5 * (T_wg_throat + T_wl_throat)) <= RocketEngine.tol_T_wg
                     break
                 else
-                    T_wg_avg_guess = 0.5 * (wall.T_wg_throat + wall.T_wl_throat);
+                    T_wg_avg_guess = 0.5 * (T_wg_throat + T_wl_throat);
                 end
             end
+            wall.T_wg_throat = T_wg_throat;
+            wall.T_wl_throat = T_wl_throat;
+            wall.q_throat = q_throat;
 
             wall.h_g_throat = h_g;
             wall.h_l_throat = h_l;
         end
 
-        function stations = solveWallTemperatures(in, material, gasProps, perf, geom, gasLine, coolant)
+        function stations = solveWallTemperatures(in, material, gasPropsByRegion, perf, geom, gasPropsByStation, coolant)
         % Heat flux and wall temperatures at every station of every engine,
         % by fixed-point iteration on the gas-side wall temperature, all
         % stations and engines at once
@@ -1695,7 +1766,7 @@ classdef RocketEngine
         %   See Assumptions 3, 4 and 6 of the class header. Also:
         %   1) Hot wall k is a function of the mean wall temperature
         %   2) Gas-side h_g: Bartz, with chamber specific heat everywhere,
-        %       throat gamma everywhere
+        %       throat gammay everywhere
         %   3) Coolant-side h_l: Gnielinski, using position along the
         %       channel measured from the nozzle exit, where coolant is
         %       taken to enter. (The old calculator subtracted the arc
@@ -1709,8 +1780,9 @@ classdef RocketEngine
             [N, S] = size(geom.r);
             r = geom.r;
             t = in.t_wall;
-            Tg = gasLine.T;
-            A = gasLine.AR .* perf.At;
+            Tg = gasPropsByStation.T;
+            A_t = perf.A_t;
+            A = gasPropsByStation.AR .* A_t;
 
             % Local radius of curvature of the wall
             dzSeg = diff(geom.z, 1, 2);
@@ -1719,11 +1791,11 @@ classdef RocketEngine
             dr = [drSeg(:, 1), drSeg];
             % Where the wall is too straight, set the radius of curvature to
             % the throat diameter, which effectively cancels Bartz's term
-            R_curv = perf.dt .* ones(N, S);
+            R_curv = perf.d_t .* ones(N, S);
             R_formula = RocketEngine.GetRadiusOfCurvature(dx = dr, dy = dz);
             % Sections meet at duplicate stations, so a segment can have no
             % length (just rounding noise), which has no curvature to speak of
-            hasLength = sqrt(dr.^2 + dz.^2) > 1E-9 .* perf.dt;
+            hasLength = sqrt(dr.^2 + dz.^2) > 1E-9 .* perf.d_t;
             curved = abs(dr ./ dz) > RocketEngine.tol_R_curv & hasLength;
             R_curv(curved) = R_formula(curved);
 
@@ -1749,8 +1821,8 @@ classdef RocketEngine
             TR_g_out = nan(N, S);
             for iter = 1:RocketEngine.maxIter_T_wg
                 % Flow-wall convection
-                sigma = RocketEngine.GetBartzCorrectionFactor(T_wg = T_wg_guess, T_c = Tg, gammay = gasProps.gamma_t, M = gasLine.M);
-                h_g = RocketEngine.GetBartzh_g(D_t = perf.dt, mu = gasLine.mu, c_p = gasProps.cp_c, Pr = gasLine.Pr, p_c = in.pc, g = RocketEngine.g0, c_star = perf.cstar, R = R_curv, A_t = perf.At, A = A, sigma = sigma);
+                sigma = RocketEngine.GetBartzCorrectionFactor(T_wg = T_wg_guess, T_c = Tg, gammay = gasPropsByRegion.gammay_t, M = gasPropsByStation.M);
+                h_g = RocketEngine.GetBartzh_g(D_t = perf.d_t, mu = gasPropsByStation.mu, c_p = gasPropsByRegion.cp_c, Pr = gasPropsByStation.Pr, p_c = in.p_c, g = RocketEngine.g0, c_star = perf.cstar, R = R_curv, A_t = A_t, A = A, sigma = sigma);
                 TR_g = RocketEngine.GetThermalResistance(heat_transfer_type = "forced convection", h = h_g, r_0 = r, r_1 = r);
 
                 % Hot wall conduction, first with k from the guess, then
