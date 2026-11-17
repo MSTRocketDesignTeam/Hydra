@@ -63,8 +63,8 @@ rArray = repmat(rArray(:), 1, size(thetaArray, 2));
 xArray = rArray .* cos(thetaArray);
 yArray = rArray .* sin(thetaArray);
 close all
-fig = figure();
-ax = axes(fig);
-surf(ax, xArray, yArray, zArray);
-axis equal;
-view(3);
+% fig = figure();
+% ax = axes(fig);
+% surf(ax, xArray, yArray, zArray);
+% axis equal;
+% view(3);
