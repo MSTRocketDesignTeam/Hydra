@@ -1013,32 +1013,32 @@ classdef RocketEngine
     methods (Static, Access = private)
 
         function args = parseArgs(args)
-                arguments
-                    args.name = "Hydra"
-                    args.fuel (1, 1) Propellant = Propellant("ETHANOL_L")
-                    args.oxidizer (1, 1) Propellant = Propellant("N2O_L")
-                    args.material (1, 1) Material = Material("AlSi10Mg")
-                    args.alt (1, 1) double = 342
-                    args.T_amb (1, 1) double = 273.15 + 20
-                    args.p_a (1, 1) double = NaN
-                    args.p_c double = 128 * 6894.76
-                    args.MR double = 1.6
-                    args.mdot double = 1.2 * .45359237
-                    args.d_channel double = 1.2E-3
-                    args.num_channels double = 48
-                    args.T_coolant_i double = []
-                    args.t_wall double = .8E-3
-                    args.CR double = 6
-                    args.Lstar double = .6
-                    args.thetaN (1, 1) double = 20 % deg
-                    args.fpct (1, 1) double = 1
-                    args.etaRc (1, 1) double = .2
-                    args.DF_stress (1, 1) double = 2
-                    args.DF_temp (1, 1) double = 1.5
-                    args.DF_p_coolant (1, 1) double = 1.2
-                    args.flagIsSolved (1, 1) logical = false
-                end
+            arguments
+                args.name = "Hydra"
+                args.fuel (1, 1) Propellant = Propellant("ETHANOL_L")
+                args.oxidizer (1, 1) Propellant = Propellant("N2O_L")
+                args.material (1, 1) Material = Material("AlSi10Mg")
+                args.alt (1, 1) double = 342
+                args.T_amb (1, 1) double = 273.15 + 20
+                args.p_a (1, 1) double = NaN
+                args.p_c double = 128 * 6894.76
+                args.MR double = 1.6
+                args.mdot double = 1.2 * .45359237
+                args.d_channel double = 1.2E-3
+                args.num_channels double = 48
+                args.T_coolant_i double = []
+                args.t_wall double = .8E-3
+                args.CR double = 6
+                args.Lstar double = .6
+                args.thetaN (1, 1) double = 20 % deg
+                args.fpct (1, 1) double = 1
+                args.etaRc (1, 1) double = .2
+                args.DF_stress (1, 1) double = 2
+                args.DF_temp (1, 1) double = 1.5
+                args.DF_p_coolant (1, 1) double = 1.2
+                args.flagIsSolved (1, 1) logical = false
             end
+        end
 
         function requireArgs(args, requiredNames)
         % Throws error if a required name-value argument was left unassigned
@@ -1129,7 +1129,7 @@ classdef RocketEngine
                 ceaByCR(CR) = py.rocketcea.cea_obj.CEA_Obj(fuelName = fuel.name, oxName = oxidizer.name, fac_CR = CR);
             end
 
-            %% Stage 1: expansion ratio of each case
+            %% Stage 1: get optimal expansion ratio of each case based on ambient pressure at design altitude
             % One call per (p_c, CR, p_a), with all of its MR's in a list
             epsUnique = nan(numUnique, 1);
             [uniqueGroups, ~, groupOf] = unique(uniqueCEAKeys(:, [1 3 4]), "rows");
